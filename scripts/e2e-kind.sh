@@ -149,6 +149,22 @@ for m in readlist_works_total readlist_grade_counts readlist_lists_total \
          readlist_runs_retained readlist_last_score_unix; do
   has "$MET" "$m" || fail "metrics 缺 $m"
 done
+# 新鲜度 / 判别力 / 数据质量。只看 last_score 是不够的:score 在陈旧 facts 上每晚
+# 照样成功,snapshot 或 ingest 挂掉一个月它依然常绿。
+for m in readlist_last_snapshot_unix readlist_last_ingest_unix readlist_dim_measured \
+         readlist_pubdate_source readlist_orphan_rows readlist_ingest_requests; do
+  has "$MET" "$m" || fail "metrics 缺 $m"
+done
+
+say "检查 ETag/304:内容按 run 不可变,爬虫不该每次都打到源站"
+ETAG=$(curl -s -D - -o /dev/null "$BASE/api/v1/lists/timeless" | tr -d '\r' \
+        | awk 'tolower($1)=="etag:"{print $2}')
+[ -n "$ETAG" ] || fail "/api/v1/lists/timeless 缺 ETag"
+code=$(CODE -H "If-None-Match: $ETAG" "$BASE/api/v1/lists/timeless")
+[ "$code" = "304" ] || fail "带 If-None-Match 应回 304(实际 $code)"
+
+say "检查存活探针:必须不碰数据库(否则高负载时 kubelet 会杀掉唯一副本)"
+[ "$(CODE "$BASE/livez")" = "200" ] || fail "/livez 不可达"
 
 say "检查 matrix:真实 run 可访问且长缓存,未知 run 必须 404"
 MX=$(GET "/api/v1/matrix/$RUN")

@@ -348,10 +348,16 @@ func serve(cfg config.Config, db *store.DB, presets []preset.Preset) error {
 		}
 	}
 
+	// 四个超时都要给。公开端点面对的是慢连接与爬虫:少了 WriteTimeout,一个读得
+	// 很慢的客户端就能长期占住 goroutine 与那条 SQLite 连接(matrix 响应有几十 KB);
+	// 少了 IdleTimeout,keep-alive 连接会一直堆积。
 	httpServer := &http.Server{
 		Addr:              cfg.APIListenAddr,
 		Handler:           api.NewServer(db, presets, cfg.ExposeReadStatus).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {

@@ -234,20 +234,69 @@ async function renderDetail(workId) {
       <a href="${esc(data.links.openlibrary)}" target="_blank" rel="noopener">OpenLibrary</a></p>`;
 }
 
+/* ---- 全库目录:两千行纯列表没法用,筛选全在客户端(数据已经全在手上) ---- */
+
+let catalog = null;
+const catFilter = { q: "", topic: "", level: "", missingOnly: false };
+
+function catalogMatches() {
+  const q = catFilter.q.trim().toLowerCase();
+  return (catalog.works || []).filter((w) => {
+    if (catFilter.topic && w.topic !== catFilter.topic) return false;
+    if (catFilter.level && w.level !== catFilter.level) return false;
+    if (catFilter.missingOnly && !(w.missing || []).length) return false;
+    if (!q) return true;
+    return `${w.title} ${w.author || ""}`.toLowerCase().includes(q);
+  });
+}
+
+function catalogRowsHTML(rows) {
+  if (!rows.length) return `<p class="loading">没有匹配的书。</p>`;
+  return `<ul class="catalog-grid">${rows.map((w) => `
+    <li class="cat-row">
+      <span class="cat-title"><a href="#/book/${encodeURIComponent(w.work_id)}">${esc(w.title)}</a></span>
+      ${gradeBadge(w.grade)}
+      ${(w.missing || []).length ? `<span class="insufficient">数据不足（缺 ${
+        w.missing.map((d) => esc(DIM_LABEL[d] || d)).join("、")
+      }）</span>` : ""}
+      <span class="cat-meta">${esc(w.author || "")}${w.year ? " · " + w.year : ""}${w.topic ? " · " + esc(w.topic) : ""}</span>
+    </li>`).join("")}</ul>`;
+}
+
+function options(values, selected) {
+  return values.map((v) => `<option value="${esc(v)}"${v === selected ? " selected" : ""}>${esc(v)}</option>`).join("");
+}
+
 async function renderCatalog() {
-  const data = await api("/api/v1/catalog");
-  app.innerHTML = `<h1>全库目录（${data.total}）</h1>
+  catalog = await api("/api/v1/catalog");
+  const uniq = (key) => [...new Set((catalog.works || []).map((w) => w[key]).filter(Boolean))].sort();
+
+  app.innerHTML = `<h1>全库目录（${catalog.total}）</h1>
     <p class="preset-desc">目录收录全库。缺少关键维度的书会标注「数据不足」——
       它进不了需要那几维的榜单,但不会从站上消失。</p>
-    <ul class="catalog-grid">${data.works.map((w) => `
-      <li class="cat-row">
-        <span class="cat-title"><a href="#/book/${encodeURIComponent(w.work_id)}">${esc(w.title)}</a></span>
-        ${gradeBadge(w.grade)}
-        ${(w.missing || []).length ? `<span class="insufficient">数据不足（缺 ${
-          w.missing.map((d) => esc(DIM_LABEL[d] || d)).join("、")
-        }）</span>` : ""}
-        <span class="cat-meta">${esc(w.author || "")}${w.year ? " · " + w.year : ""}${w.topic ? " · " + esc(w.topic) : ""}</span>
-      </li>`).join("")}</ul>`;
+    <div class="cat-filters">
+      <input id="cat-q" type="search" placeholder="搜索书名或作者…" value="${esc(catFilter.q)}">
+      <select id="cat-topic"><option value="">全部主题</option>${options(uniq("topic"), catFilter.topic)}</select>
+      <select id="cat-level"><option value="">全部层级</option>${options(uniq("level"), catFilter.level)}</select>
+      <label class="cat-check"><input id="cat-missing" type="checkbox"${catFilter.missingOnly ? " checked" : ""}> 只看数据不足</label>
+      <span id="cat-count" class="coverage"></span>
+    </div>
+    <div id="cat-list"></div>`;
+
+  const repaint = () => {
+    const rows = catalogMatches();
+    app.querySelector("#cat-list").innerHTML = catalogRowsHTML(rows);
+    app.querySelector("#cat-count").textContent = `${rows.length} / ${catalog.total}`;
+  };
+  const bind = (sel, ev, fn) => {
+    const el = app.querySelector(sel);
+    if (el) el.addEventListener(ev, (e) => { fn(e.target); repaint(); });
+  };
+  bind("#cat-q", "input", (t) => { catFilter.q = t.value; });
+  bind("#cat-topic", "change", (t) => { catFilter.topic = t.value; });
+  bind("#cat-level", "change", (t) => { catFilter.level = t.value; });
+  bind("#cat-missing", "change", (t) => { catFilter.missingOnly = !!t.checked; });
+  repaint();
 }
 
 async function route() {

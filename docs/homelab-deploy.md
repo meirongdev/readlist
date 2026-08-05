@@ -28,9 +28,10 @@
 | **pubdate 自带来源**:外部响应里就有 `publishedDate` → 写成 `pubdate_source=google\|openlibrary`,**不依赖修 calibre 的库**(review M2) | FR-1x, R-1 |
 | 半衰期规则链:BISAC 码 → 标注 → 标题关键词 → 默认 | system-design §6 |
 | 镜像 CI:`ci.yml`(check + race + arm64 构建验证)、`image.yml`(buildx amd64+arm64 → ghcr,禁 `latest`) | C-3, NFR-5 |
-| 生产参照清单 `deploy/oracle/`:ClusterIP + HTTPRoute、三个 CronJob、快照/打分作业**零网络出口**的 NetworkPolicy、PVC 备份标签 | C-1~C-7 |
+| 生产参照清单 `deploy/oracle/`:ClusterIP + HTTPRoute、三个 CronJob(带 `timeZone: Etc/UTC`)、快照/打分作业**零网络出口**的 NetworkPolicy、PVC 备份标签 | C-1~C-7 |
 | run 保留上限 `KEEP_RUNS`(默认 5),发布同事务里回收 | NFR-17 |
 | 单副本 `Recreate` / 显式 resources / 只读 API / Prometheus 指标 | NFR-6, NFR-7, FR-53, FR-60 |
+| **抗爬**:快照按 run 进程内缓存、内容端点 `ETag` + 304、`/livez` 存活探针不碰数据库、HTTP 读写空闲超时齐备 | NFR-14, review B2 |
 
 ---
 
@@ -64,8 +65,23 @@
 | 动作 | 落点 | 依据 |
 |------|------|------|
 | Cloudflare WAF 分档限流:页面一档,`/api/` 更严一档 | Cloudflare(非代码) | NFR-14 |
-| 指标接监控:`readlist_last_score_unix`(静默过期的唯一警报)、`readlist_grade_counts`、`readlist_runs_retained` | homelab 监控 | FR-60, FR-61 |
-| `runs.orphan_rows` 告警(孤儿突增 = book id 漂移) | homelab 监控 | FR-62 |
+| 指标接监控(清单见下) | homelab 监控 | FR-60, FR-61, FR-62 |
+
+⚠️ **别只报 `last_score`**:`score` 在陈旧 facts 上每晚照样成功 —— snapshot 或 ingest
+挂掉一个月,这个指标依然常绿,而全站数据已经冻结。而那两个才是容易挂的:一个依赖
+calibre 卷还在,另一个依赖外部配额。建议的告警:
+
+| 指标 | 告警条件 | 说的是什么 |
+|------|---------|-----------|
+| `readlist_last_snapshot_unix` | 距今 > 36h | 语料停止更新(calibre 卷 / CronJob 出问题) |
+| `readlist_last_ingest_unix` | 距今 > 72h | 外部证据停止更新(配额 / 网络 / 429 熔断) |
+| `readlist_last_score_unix` | 距今 > 36h | 榜单停止重算 |
+| `readlist_orphan_rows` | 突增 | book id 漂移(有人删书或重导入) |
+| `readlist_pubdate_source{source="mtime-fallback"}` | 长期不降 | 时效维度的上限卡在这儿(PRD §5 护栏) |
+| `readlist_dim_measured{dim="…"}` | 某维接近 0 | 这一维没有判别力 —— 榜单不会因此报错 |
+| `readlist_ingest_throttled` | > 0 | 被限流,通常意味着该配 / 该换 `GOOGLE_BOOKS_KEY` |
+| `readlist_ingest_budget_exhausted` | 持续 = 1 | 首轮还没跑完,或预算给太小 |
+| `readlist_grade_counts` / `readlist_runs_retained` | 趋势观察 | 数据质量与 PVC 占用 |
 
 ### 3.4 尚未做,且**不阻塞**上线
 

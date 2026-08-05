@@ -63,14 +63,19 @@ spec:
           command: ["readlist", "serve"]
           envFrom: [{ configMapRef: { name: readlist-config } }]
           ports: [{ containerPort: 8080 }]
+          # 就绪探针查库(「现在能不能提供内容」),存活探针**不查库**。
+          # 让 liveness 也查库,等于在高负载时主动杀掉唯一副本 —— 而 SQLite 单写锁下
+          # 这个副本不可替代。两个探针都显式给 timeoutSeconds(默认只有 1 秒)。
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 3
             periodSeconds: 5
+            timeoutSeconds: 3
           livenessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 10
             periodSeconds: 15
+            timeoutSeconds: 3
           resources:
             requests: { cpu: 50m, memory: 64Mi }
             limits: { cpu: 500m, memory: 256Mi }
@@ -101,6 +106,7 @@ metadata:
   namespace: readlist
 spec:
   schedule: "17 1 * * *"
+  timeZone: Etc/UTC # 与 readlist 内部一律用 UTC 的口径对齐,节点时区变了也不漂移
   concurrencyPolicy: Forbid
   jobTemplate:
     spec:

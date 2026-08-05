@@ -42,6 +42,9 @@ func (s *Server) handleLists(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err, "published_run")
 		return
 	}
+	if writeRunCache(w, r, runID) {
+		return
+	}
 	presets := s.publicPresets()
 	out := make([]listMeta, 0, len(presets))
 	for _, p := range presets {
@@ -84,6 +87,9 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	if runID == "" {
 		writeError(w, http.StatusNotFound, "no published run")
+		return
+	}
+	if writeRunCache(w, r, runID) {
 		return
 	}
 

@@ -10,10 +10,11 @@
 <body>
 <header class="topbar">
   <a href="#/" class="brand">📚 readlist</a>
+  <!-- 运维端点(/metrics、/healthz)不出现在公开导航里 —— 它们是给监控抓的,
+       不是给访客点的。要看直接访问路径即可。 -->
   <nav>
     <a href="#/">榜单</a>
     <a href="#/catalog">全库目录</a>
-    <a href="/metrics">指标</a>
   </nav>
 </header>
 <main id="app"><p class="loading">加载中…</p></main>

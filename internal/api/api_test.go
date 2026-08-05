@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +37,17 @@ func doReq(t *testing.T, s *Server, method, path string) *httptest.ResponseRecor
 	t.Helper()
 	rr := httptest.NewRecorder()
 	s.Routes().ServeHTTP(rr, httptest.NewRequest(method, path, nil))
+	return rr
+}
+
+func doReqWith(t *testing.T, s *Server, path string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rr := httptest.NewRecorder()
+	s.Routes().ServeHTTP(rr, req)
 	return rr
 }
 
@@ -292,4 +305,112 @@ func TestHealthzAndMetrics(t *testing.T) {
 	} {
 		require.Contains(t, body, want)
 	}
+}
+
+func TestMetricsCoverFreshnessAndDataQuality(t *testing.T) {
+	// 只看 last_score 是不够的:score 在陈旧 facts 上每晚照样成功,snapshot 或 ingest
+	// 挂掉一个月它依然常绿(review B1)。判别力与数据质量同理 —— 一维全是收缩值、
+	// 或 mtime 污染没被清掉,榜单都不会报错。
+	s := newTestServer(t, true)
+	body := doReq(t, s, http.MethodGet, "/metrics").Body.String()
+	for _, want := range []string{
+		"readlist_last_snapshot_unix", "readlist_last_ingest_unix",
+		"readlist_dim_measured", "readlist_pubdate_source", "readlist_orphan_rows",
+		"readlist_ingest_requests", "readlist_ingest_throttled",
+	} {
+		require.Contains(t, body, want)
+	}
+	// 逐维都要出现:某一维归零时要看得出是「归零」,而不是「指标丢了」。
+	for _, d := range score.AllDims {
+		require.Contains(t, body, fmt.Sprintf("readlist_dim_measured{dim=%q}", d))
+	}
+	// PRD §5 的护栏指标(mtime-fallback → 0)的唯一观测点。演示语料里确实有这类书。
+	require.Contains(t, body, `readlist_pubdate_source{source="mtime-fallback"}`)
+}
+
+// ---------- 缓存与探针(review B2)----------
+
+func TestContentEndpointsAreRevalidatable(t *testing.T) {
+	// 内容按 run 不可变,而 run 每夜才换一次。没有 ETag,每个爬虫请求都要落到源站,
+	// 而源站是「一条 SQLite 连接 + 单副本」—— 这是自伤,边缘限流挡不住。
+	s := newTestServer(t, true)
+	for _, path := range []string{
+		"/api/v1/lists",
+		"/api/v1/lists/timeless",
+		"/api/v1/catalog",
+		workPath("kleppmann/designing data intensive applications"),
+		"/",       // SPA 外壳
+		"/app.js", // 文件名里没有内容哈希,只能靠 ETag 既拿 304 又能在换镜像后失效
+	} {
+		rr := doReq(t, s, http.MethodGet, path)
+		require.Equal(t, http.StatusOK, rr.Code, path)
+		etag := rr.Header().Get("ETag")
+		require.NotEmpty(t, etag, "%s 缺 ETag", path)
+		require.NotEmpty(t, rr.Header().Get("Cache-Control"), "%s 缺 Cache-Control", path)
+
+		again := doReqWith(t, s, path, map[string]string{"If-None-Match": etag})
+		require.Equal(t, http.StatusNotModified, again.Code, "%s 应命中 304", path)
+		require.Empty(t, again.Body.String(), "%s 的 304 不该带响应体", path)
+
+		// 弱校验前缀与逗号列表都要认(RFC 9110)。
+		weak := doReqWith(t, s, path, map[string]string{"If-None-Match": `W/` + etag + `, "other"`})
+		require.Equal(t, http.StatusNotModified, weak.Code, "%s 未处理弱校验/列表形式", path)
+	}
+}
+
+func TestNewRunInvalidatesETagAndCache(t *testing.T) {
+	// 缓存与 ETag 都以 published_run 为键。搞错的话表现是:重算成功了,
+	// 但站点继续服务旧榜,而且没有任何报错。
+	s := newTestServer(t, true)
+	before := doReq(t, s, http.MethodGet, "/api/v1/lists/timeless")
+	beforeETag := before.Header().Get("ETag")
+	beforeRun := getJSON(t, before)["run_id"].(string)
+
+	presets, err := preset.Load()
+	require.NoError(t, err)
+	_, err = score.NewEngine(s.db, "1.0", time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)).Run(presets)
+	require.NoError(t, err)
+
+	after := doReq(t, s, http.MethodGet, "/api/v1/lists/timeless")
+	require.NotEqual(t, beforeETag, after.Header().Get("ETag"), "换 run 后 ETag 必须变")
+	require.NotEqual(t, beforeRun, getJSON(t, after)["run_id"], "换 run 后必须服务新 run")
+	// 旧 ETag 不能再命中 304,否则读者会被永久钉在旧榜上。
+	require.Equal(t, http.StatusOK,
+		doReqWith(t, s, "/api/v1/lists/timeless", map[string]string{"If-None-Match": beforeETag}).Code)
+}
+
+func TestSnapshotCacheIsSafeUnderConcurrency(t *testing.T) {
+	// 快照缓存被所有请求共享,而 -race 只有在**真的并发**时才看得见问题。
+	// 缓存里那个 *snapshot 是只读共享的,任何原地修改都会在这里暴露。
+	s := newTestServer(t, true)
+	paths := []string{
+		"/api/v1/lists/timeless", "/api/v1/catalog", "/api/v1/lists",
+		workPath("kleppmann/designing data intensive applications"),
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			rr := httptest.NewRecorder()
+			s.Routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+			if rr.Code != http.StatusOK {
+				t.Errorf("%s → %d", path, rr.Code)
+			}
+		}(paths[i%len(paths)])
+	}
+	wg.Wait()
+}
+
+func TestLivezSurvivesDatabaseFailure(t *testing.T) {
+	// 存活探针必须**不碰数据库**:数据库慢或坏是「暂时别收流量」(readiness),
+	// 不是「进程坏了该重启」。让 liveness 查库,等于在高负载时杀掉唯一副本 ——
+	// 而 SQLite 单写锁下这个副本不可替代。
+	s := newTestServer(t, true)
+	require.NoError(t, s.db.Close())
+
+	live := doReq(t, s, http.MethodGet, "/livez")
+	require.Equal(t, http.StatusOK, live.Code, "/livez 不该依赖数据库")
+	require.Equal(t, http.StatusInternalServerError,
+		doReq(t, s, http.MethodGet, "/healthz").Code, "/healthz 该如实报告数据库故障")
 }

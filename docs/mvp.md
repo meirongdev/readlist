@@ -36,7 +36,16 @@ readlist init      # seed + 首次 score(供 kind initContainer;已发布则跳�
 
 `ingest` 的关键性质:
 - 评分证据按**外部实体 id** 存(Google volume / OL work),同一 work 的多个版次不会把
-  同一份评分计两遍;"查不到"也缓存,免得每晚重烧配额;
+  同一份评分计两遍;"查不到"也缓存,免得每晚重烧配额。
+  消费侧**读取时**用 `editions`/`works` 当前的标识符解析回 work —— 改一个书名就换 `work_id`,
+  按写入时的 `work_id` 绑定会让证据静默失联(而查询标记还新鲜,180 天不会重抓);
+- TTL 分两类且互不遮挡:Google 一次请求同时带 volume id 与评分,所以命中后标记按**评分
+  TTL**(30 天)算;OpenLibrary 是两跳,ISBN→work 的映射压 180 天,但评分那一跳靠
+  已存的 `ol_work_id` 单独重取。混用会让评分实际半年才更新一次;
+- 查询标记的键用**摄入自己不会改写**的标识符(优先 ISBN):否则把查出来的 volume id
+  写回 editions 之后,次夜算出的键就变了 → 标记全部落空 → 刚查过的书被重查一遍;
+- 每次运行落一条 `kind='ingest'` 的 run(请求数 / 429 / 缓存命中 / 预算是否打满),
+  指标据此报警。pod 日志不算痕迹:`successfulJobsHistoryLimit: 1` 会把它滚掉;
 - 顺手写 `pubdate` + `pubdate_source`,**不需要先修 calibre 的库**(review M2);
 - 预算打满就干净停下,下次接着跑;某源 429 则熔断该源,其余照常。
 
@@ -52,7 +61,10 @@ readlist init      # seed + 首次 score(供 kind initContainer;已发布则跳�
 | 可复现 | 无 map 迭代序依赖 + `work_id` 并列打破键 + 每个 run 落真实 `corpus_id`/`facts_hash` |
 | 原子发布 | `published_run` 单行指针;`lists`/`dim_scores`/`norm_cdf` 按 run 存;发布同事务里回收超出 `KEEP_RUNS` 的旧 run |
 | 配置校验 | `presets.yaml` 加载即校验(权重和为 1、`bands ⊆ weights`、维度名与状态合法……),写错则启动失败 |
-| 只读 API | `GET /api/v1/lists` `{id}` `works/{id}` `matrix/{run}` `catalog` `/metrics` `/healthz`;非 GET 一律 405;未知 run 404 |
+| 只读 API | `GET /api/v1/lists` `{id}` `works/{id}` `matrix/{run}` `catalog` `/metrics` `/healthz` `/livez`;非 GET 一律 405;未知 run 404 |
+| 缓存 | 快照按 `published_run` 在进程内缓存;内容端点带 `ETag: run_id` 并处理 `If-None-Match`(304);静态资源用内容指纹做 ETag |
+| 探针 | `/healthz` 查库(readiness)、`/livez` 不碰库(liveness)—— 数据库慢是「别收流量」,不是「重启我」 |
+| 人工干预 | `overrides` 的 `veto` / `pin` 在选材层生效(pin 绕过全部准入,理由串写明「人工置顶」);`mention_overrides` 逐条否决 HN 误匹配 |
 | 前端 | 内嵌 SPA:预设切换 + 权重滑块(纯客户端点积/band/coverage 重排,与后端公式逐位一致)+ 阅读徽章 + 目录页逐本标注缺哪几维 |
 | 阅读状态 | 只读镜像,facet 不进分;受 `EXPOSE_READ_STATUS` 控制;`to-read-next` / `read-and-loved` 由它派生 |
 

@@ -43,8 +43,8 @@ type workBase struct {
 	Topic     string `json:"topic"`
 	Level     string `json:"level"`
 	Publisher string `json:"publisher,omitempty"`
-	// Year 是**首版年份**(最早版次)。评分引擎的 min_age_years 用的也是最早版次,
-	// 两边口径一致;各版次的日期在 editions 里逐条列出。
+	// Year 是**首版年份**(最早版次,且跳过被污染的日期来源)。评分引擎的 min_age_years
+	// 用的是同一口径,两边一致;各版次的原始日期与来源在 editions 里逐条列出。
 	Year        int    `json:"year,omitempty"`
 	Language    string `json:"language,omitempty"`
 	Format      string `json:"format,omitempty"`
@@ -86,10 +86,13 @@ func readStatusRank(status string) int {
 	}
 }
 
-// snapshot 一次请求内的只读视图。
+// snapshot 一个 run 的只读视图。
 //
 // 四个内容 handler 此前各自重复拉同样的四张表、各自把错误丢进 `_`,DB 出问题时
 // 表现为静默 200 + 空数据。收敛成一个入口后,错误只需在一处处理。
+//
+// ⚠️ 构造完成后**必须视为不可变**:同一个 *snapshot 会被多个请求共享(见 Server.cached),
+// 任何原地修改都是数据竞争。要按请求裁剪就拷一份。
 type snapshot struct {
 	RunID    string
 	Version  string
@@ -100,7 +103,30 @@ type snapshot struct {
 	Reading  map[string]readingInfo
 }
 
+// snapshot 取一个 run 的视图,命中缓存则零查询返回。
 func (s *Server) snapshot(runID, version string) (*snapshot, error) {
+	s.mu.RLock()
+	cached := s.cached
+	s.mu.RUnlock()
+	if cached != nil && cached.RunID == runID && cached.Version == version {
+		return cached, nil
+	}
+
+	snap, err := s.buildSnapshot(runID, version)
+	if err != nil {
+		return nil, err
+	}
+	// 只缓存**已发布**的那个 run。matrix 可以按任意历史 run 寻址,若也进这个单槽缓存,
+	// 交替请求两个 run 就能让每一个请求都重建一遍 —— 把缓存变成放大器。
+	if published, _, err := s.publishedRun(); err == nil && published == runID {
+		s.mu.Lock()
+		s.cached = snap
+		s.mu.Unlock()
+	}
+	return snap, nil
+}
+
+func (s *Server) buildSnapshot(runID, version string) (*snapshot, error) {
 	snap := &snapshot{RunID: runID, Version: version}
 	var err error
 	if snap.Bases, snap.Editions, err = s.loadWorkBases(); err != nil {
@@ -168,7 +194,10 @@ func (s *Server) loadWorkBases() (map[string]workBase, map[string][]editionRow, 
 		if corpus.FormatRank(format) > corpus.FormatRank(b.Format) {
 			b.Format = format
 		}
-		if t, ok := parsePubdate(pubdate); ok && (b.Year == 0 || t.Year() < b.Year) {
+		// 与评分引擎同一口径:被污染的来源(mtime 兜底/缺失)不参与年份展示。
+		// 否则一本 2013 年的书会因为某个版次的 mtime 兜底值而在页面上显示成 2026。
+		if t, ok := parsePubdate(pubdate); ok && score.PubdateUsableForAge(pubdateSrc.String) &&
+			(b.Year == 0 || t.Year() < b.Year) {
 			b.Year = t.Year()
 		}
 		bases[workID] = b

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/meirongdev/readlist/internal/preset"
 	"github.com/meirongdev/readlist/internal/store"
@@ -14,6 +16,16 @@ type Server struct {
 	db         *store.DB
 	presets    []preset.Preset
 	exposeRead bool
+
+	// 已发布 run 的快照缓存。内容按 run 不可变,而 run 每夜才换一次。
+	//
+	// 没有它,每个内容请求都要重新拉 works+editions(约 2.5 千行)+ dim_scores
+	// (约 1.4 万行)+ reading,而连接池只有一条连接 → 一阵爬虫就能让请求排队,
+	// 让同样查库的 /healthz 超过 livenessProbe 的默认 1 秒超时,于是 kubelet
+	// 在高负载时杀掉唯一副本(review B2)。限流挡不住这种自伤:阈值之下的正常流量
+	// 就足够触发。
+	mu     sync.RWMutex
+	cached *snapshot
 }
 
 // NewServer 构建 API 服务。
@@ -25,6 +37,7 @@ func NewServer(db *store.DB, presets []preset.Preset, exposeRead bool) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /livez", handleLivez)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /api/v1/meta", s.handleMeta)
 	mux.HandleFunc("GET /api/v1/lists", s.handleLists)
@@ -44,6 +57,37 @@ func (s *Server) Routes() http.Handler {
 	return mux
 }
 
+// writeRunCache 给「内容随 run 变」的响应打上 ETag 与缓存头,并处理 If-None-Match。
+// 返回 true 表示已经回了 304,调用方必须直接返回。
+//
+// 榜单每夜才换一次,而公开站的流量以爬虫为主 —— 一个 ETag 就能让边缘把绝大部分请求
+// 挡在源站之外。这与边缘限流是两件事:限流防滥用,缓存防**常态**负载。
+// max-age 故意短:配合 ETag,换 run 之后最多 60 秒被发现,而重验证只花一个 304。
+func writeRunCache(w http.ResponseWriter, r *http.Request, runID string) bool {
+	if runID == "" {
+		return false // 还没打分:别缓存一个空站
+	}
+	etag := `"` + runID + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
+	if m := r.Header.Get("If-None-Match"); m != "" && etagMatches(m, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+	return false
+}
+
+// etagMatches 按 RFC 9110 比对 If-None-Match:允许逗号列表、弱校验前缀与 `*`。
+func etagMatches(header, etag string) bool {
+	for _, part := range strings.Split(header, ",") {
+		p := strings.TrimSpace(part)
+		if p == "*" || p == etag || strings.TrimPrefix(p, "W/") == etag {
+			return true
+		}
+	}
+	return false
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -61,7 +105,8 @@ func fail(w http.ResponseWriter, r *http.Request, err error, what string) {
 	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
-// loadSnapshot 取已发布 run 的只读视图;未打分时返回 ok=false 并已写好响应。
+// loadSnapshot 取已发布 run 的只读视图;未打分或已回 304 时返回 ok=false,
+// 且响应已经写好。
 func (s *Server) loadSnapshot(w http.ResponseWriter, r *http.Request) (*snapshot, bool) {
 	runID, version, err := s.publishedRun()
 	if err != nil {
@@ -70,6 +115,9 @@ func (s *Server) loadSnapshot(w http.ResponseWriter, r *http.Request) (*snapshot
 	}
 	if runID == "" {
 		writeError(w, http.StatusNotFound, "no published run")
+		return nil, false
+	}
+	if writeRunCache(w, r, runID) {
 		return nil, false
 	}
 	snap, err := s.snapshot(runID, version)
