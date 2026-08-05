@@ -22,7 +22,9 @@ type ImportStats struct {
 	PubdateSuspect int `json:"pubdate_suspect"` // 判为 mtime 兜底的书数
 	PubdateUnknown int `json:"pubdate_unknown"` // 缺失或占位值
 	Publishers     int `json:"publishers"`
-	RunID          string
+	// PublisherOverrides 命中人工归一表的版次数(publisher_map 里 source='manual' 的行)。
+	PublisherOverrides int `json:"publisher_overrides"`
+	RunID              string
 }
 
 // Import 把 calibre 快照写进 readlist 自己的表:works 聚类 + publisher 归一 +
@@ -146,8 +148,17 @@ func Import(d *store.DB, snap *calibre.Snapshot, now time.Time) (ImportStats, er
 	}
 	defer edStmt.Close()
 
-	pubStmt, err := tx.Prepare(
-		`INSERT OR REPLACE INTO publisher_map (raw, norm, tier) VALUES (?,?,?)`)
+	// 人工归一优先。内置规则表认不出的出版社变体(真实语料里必然有)只能靠这张表,
+	// 而它此前是只写不读的(review B5)。
+	manualPublishers, err := loadManualPublishers(tx)
+	if err != nil {
+		return st, err
+	}
+	// 规则行可以每夜刷新,人工行永不被覆盖 —— 这就是 WHERE source='rules' 的作用。
+	pubStmt, err := tx.Prepare(`INSERT INTO publisher_map (raw, norm, tier, source)
+		VALUES (?,?,?,'rules')
+		ON CONFLICT(raw) DO UPDATE SET norm=excluded.norm, tier=excluded.tier
+		WHERE publisher_map.source='rules'`)
 	if err != nil {
 		return st, err
 	}
@@ -156,6 +167,10 @@ func Import(d *store.DB, snap *calibre.Snapshot, now time.Time) (ImportStats, er
 
 	for _, b := range books {
 		pi := Publisher(b.Publisher)
+		if ov, ok := manualPublishers[b.Publisher]; ok {
+			pi = ov
+			st.PublisherOverrides++
+		}
 		if b.Publisher != "" && !seenPublisher[b.Publisher] {
 			seenPublisher[b.Publisher] = true
 			if _, err := pubStmt.Exec(b.Publisher, pi.Norm, pi.Tier); err != nil {
@@ -276,6 +291,26 @@ func bestFormat(formats []string) string {
 		}
 	}
 	return best
+}
+
+// loadManualPublishers 读出人工归一行(原始名 → 规范名 + tier)。
+func loadManualPublishers(tx *sql.Tx) (map[string]PublisherInfo, error) {
+	rows, err := tx.Query(
+		`SELECT raw, norm, tier FROM publisher_map WHERE source='manual' ORDER BY raw`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]PublisherInfo{}
+	for rows.Next() {
+		var raw, norm string
+		var tier int
+		if err := rows.Scan(&raw, &norm, &tier); err != nil {
+			return nil, err
+		}
+		out[raw] = PublisherInfo{Norm: norm, Tier: tier}
+	}
+	return out, rows.Err()
 }
 
 func scanInts(tx *sql.Tx, query string) ([]int, error) {

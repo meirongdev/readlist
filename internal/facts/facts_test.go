@@ -354,6 +354,46 @@ func TestIngestCachesAndRespectsTTL(t *testing.T) {
 	require.Positive(t, third.Requests, "TTL 过期后应重新取评分")
 }
 
+func TestOpenLibraryRatingsRefreshIndependentlyOfISBNMapping(t *testing.T) {
+	// OL 是**两跳**:ISBN→work 的映射稳定(180 天),而评分是 30 天 TTL。
+	// 之前查询标记一新鲜就直接 return,于是第二跳永远不会发生 —— 评分实际 180 天
+	// 才刷一次,而规格写的是 30 天(review A3)。
+	f := newFakeAPIs(t)
+	db := newDB(t)
+	_, err := facts.Ingest(db, f.cfg(100))
+	require.NoError(t, err)
+	require.Positive(t, f.count("openlib:ratings"), "前提:首轮取到过评分")
+	isbnHops := f.count("openlib") - f.count("openlib:ratings")
+	require.Positive(t, isbnHops)
+
+	later := f.cfg(100)
+	later.Now = now.AddDate(0, 0, 31)
+	_, err = facts.Ingest(db, later)
+	require.NoError(t, err)
+
+	require.Greater(t, f.count("openlib:ratings"), 1, "评分过了 30 天 TTL,必须重取")
+	require.Equal(t, isbnHops, f.count("openlib")-f.count("openlib:ratings"),
+		"ISBN→work 的映射是 180 天的,不该被一起重查")
+}
+
+func TestGoogleQueryMarkerKeyIsStableAcrossRuns(t *testing.T) {
+	// 摄入会把查出来的 volume id 写回 editions(为了让评分行能被读取时解析回 work)。
+	// 若查询标记的键优先用 google id,那次写回就会让次夜算出的键变掉 → 标记全部落空
+	// → 刚查过的书被整批重查。所以键必须用摄入自己不会改写的标识符(ISBN 优先)。
+	f := newFakeAPIs(t)
+	db := newDB(t)
+	_, err := facts.Ingest(db, f.cfg(100))
+	require.NoError(t, err)
+
+	// 前提:ISBN 查出来的 volume id 确实落了库(否则这条测试什么都没验)。
+	require.Equal(t, "GV-LEARNGO", queryOne[string](t, db,
+		`SELECT COALESCE(google_volume_id,'') FROM editions WHERE book_id=2`))
+
+	second, err := facts.Ingest(db, f.cfg(100))
+	require.NoError(t, err)
+	require.Zero(t, second.Requests, "volume id 写回之后,查询标记必须照旧命中")
+}
+
 func TestIngestStopsCleanlyWhenBudgetExhausted(t *testing.T) {
 	f := newFakeAPIs(t)
 	db := newDB(t)

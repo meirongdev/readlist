@@ -109,6 +109,21 @@ F = 100 · 0.5 ^ (age_years / half_life)
 ⚠️ **前置**：`pubdate_source` 必须可信（[data-baseline §2](data-baseline.md#2--发现一pubdate-已被-mtime-污染)）。
 不可信 → **F = 未知**，不参与任何按 F 排序的榜，且证据等级压到 C。
 
+⚠️ **守住 F 维不等于守住时效**：preset 的时间**过滤器**走的是另一条路径，
+被污染的日期同样不许进去（review A2）。两个方向刻意**不对称**，因为代价不对称：
+
+| 问题 | 依据 | 日期未知时 |
+|------|------|-----------|
+| 够不够**新**（`pubdate_within_months` / `pubdate_year`） | 仅 `TrustedPubdate` | **排除** —— 想上「新书榜」得先证明自己新 |
+| 够不够**老**（`min_age_years`） | 未被污染来源里的最早版次 | **放行**，且理由串写明「年龄未核实」 |
+
+「够老」若也失败，那 477 本（23%）只有 mtime 兜底日期、又没有标识符可供 `ingest` 补救的书
+会整批从「经典长青」消失 —— 那正是 [review-2026-08-04](review-2026-08-04.md) B1 判定为
+「模型错了」的全局闸门，只是换成从过滤器进来。要严格，preset 自己声明 `needs: {F: measured}`。
+
+「未被污染」比「可信」宽一档：`calibre` 来源（pubdate ≠ 文件 mtime，所以不是兜底值）
+够不上 F 维的证据标准，但拿来算年龄是合理的。严格排除的只有 `mtime-fallback` 与缺失。
+
 ### T — 权威
 
 ```
@@ -269,9 +284,20 @@ preset 用 `needs` 声明自己要什么。**准入 = `needs` 全部满足 且 `
 | `bands` | 目标带；键**必须同时出现在 `weights` 里**，否则 band 项的系数是 0（空操作） |
 | `needs` | 逐维最低证据状态，**硬门**；可以声明未加权的维度 |
 | `select` | `size` / `max_per_topic` / `max_per_author` / `min_coverage`（选材约束，见 [system-design.md §5](system-design.md)） |
-| `filters` | `min_age_years`（按**最早**版次算年龄）/ `pubdate_within_months`（滚动窗口）/ `pubdate_source` / `topics_any` / `level` / `read_status` / `not_in_shelf` / `min_personal_rating`（单位：**星 0–5**，即 calibre metadata 值 ÷ 2） |
+| `filters` | `min_age_years`（按**最早**版次算年龄，日期未知则放行）/ `pubdate_within_months`（滚动窗口，只认 `TrustedPubdate`）/ `pubdate_source` / `topics_any` / `level` / `read_status` / `not_in_shelf` / `min_personal_rating`（单位：**星 0–5**，即 calibre metadata 值 ÷ 2）。两个时间过滤器的不对称语义见 §3 的 F 维 |
 | `order` | `desc`（默认）或 `asc`（`library-hygiene` 要的是最差的那些） |
 | `visibility` | `public`（默认）或 `internal`（不出现在公开导航，也不能按 id 直接拉到） |
+
+**人工干预**（`overrides` 表，不走 YAML —— 它是逐本的判断，不是口径）：
+
+| `field` | `value` | 语义 |
+|---------|---------|------|
+| `veto` | 留空 = 全部榜单；或逗号分隔的榜 id | 这本书不进这些榜。误入公开榜的唯一即时处置手段 —— 此前只能改代码或调权重，而后者会为一本书扭曲所有书的排名 |
+| `pin` | 逗号分隔的榜 id（必填） | 强制入榜，排在算法结果之前，**绕过 `filters` / `needs` / `min_coverage` 与多样性约束** |
+
+`pin` 是 [system-design §13](system-design.md) 那个「`timeless` 是否接受一层人工 curation」
+的开关。它的代价必须被读者看见：理由串会写明「人工置顶」，**curation 不该伪装成算法结果**。
+`mention_overrides`（`verdict='reject'`）同理，是 R-3 承诺的「HN 提及可逐条否决」的落点。
 
 以上每一条都在**加载时强制校验**（`internal/preset.Validate`），写错则进程启动即失败。
 理由是这类错误不会报错、只会静默失效：`ship-this-week` 曾声明 `bands: { D: … }` 却没给

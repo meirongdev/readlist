@@ -124,10 +124,14 @@ func (e *Engine) Compute(presets []preset.Preset) (*Computation, error) {
 	for _, id := range ids {
 		grade[id] = Grade(dims[id])
 	}
-	// 6) selection
+	// 6) selection(含人工 veto / pin)
+	manual, err := e.loadManualLists()
+	if err != nil {
+		return nil, err
+	}
 	lists := map[string][]ListEntry{}
 	for _, p := range presets {
-		lists[p.ID] = e.selectList(p, ids, inputs, dims)
+		lists[p.ID] = e.selectList(p, ids, inputs, dims, manual)
 	}
 	return &Computation{
 		WorkIDs: ids, Raws: raws, Params: params, CDFs: cdfs, Dims: dims,
@@ -155,6 +159,72 @@ func (e *Engine) Run(presets []preset.Preset) (*RunResult, error) {
 		Works: c.Inputs, Dims: c.Dims, Grade: c.Grade,
 		Lists: c.Lists, CDFs: c.CDFs, Params: c.Params,
 	}, nil
+}
+
+// anyList veto 的通配目标:不写 value 就是「所有榜单都不要它」。
+const anyList = "*"
+
+// ManualLists 人工干预榜单的两个开关(overrides 表,`field` 取 veto / pin):
+//
+//	field='veto', value='' 或 '<list_id>'  → 该书不进(全部 / 指定)榜单
+//	field='pin',  value='<list_id>'        → 该书强制进该榜,排在算法结果之前
+//
+// 为什么需要它:一本明显不该出现在公开榜上的书,此前唯一的处置办法是改代码或改权重
+// —— 后者会为了一本书扭曲所有书的排名。而 system-design §13 把「timeless 是否接受
+// 一层人工 curation」列为必须由库主人决定的两件事之一,在此之前想选「接受」也没有
+// 开关可拨(review B6)。
+//
+// pin 刻意绕过 filters / needs / coverage / 多样性约束 —— 它的用途正是
+// 「这本书证据薄,但我愿意为它的排名辩护」。代价是必须让读者看见:理由串会写明
+// 「人工置顶」,curation 不该伪装成算法结果。
+type ManualLists struct {
+	veto map[string]map[string]bool // work_id → {list_id | "*"}
+	pin  map[string]map[string]bool // work_id → {list_id}
+}
+
+// Vetoed 这本书是否被否决出这份榜(或被全站否决)。
+func (m ManualLists) Vetoed(workID, listID string) bool {
+	s := m.veto[workID]
+	return s[listID] || s[anyList]
+}
+
+// Pinned 这本书是否被人工置顶到这份榜。
+func (m ManualLists) Pinned(workID, listID string) bool { return m.pin[workID][listID] }
+
+func (e *Engine) loadManualLists() (ManualLists, error) {
+	out := ManualLists{veto: map[string]map[string]bool{}, pin: map[string]map[string]bool{}}
+	rows, err := e.DB.SQL().Query(`SELECT work_id, field, COALESCE(value,'') FROM overrides
+		WHERE field IN ('veto','pin') ORDER BY work_id, field, value`)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var workID, field, value string
+		if err := rows.Scan(&workID, &field, &value); err != nil {
+			return out, err
+		}
+		target := out.veto
+		if field == "pin" {
+			target = out.pin
+		}
+		if target[workID] == nil {
+			target[workID] = map[string]bool{}
+		}
+		// overrides 的主键是 (work_id, field),一个 work 每种操作只有一行 ——
+		// 所以 value 支持逗号分隔多个榜 id,否则「否决出两份榜」就无法表达。
+		for _, listID := range strings.Split(value, ",") {
+			listID = strings.TrimSpace(listID)
+			if listID == "" {
+				if field == "pin" {
+					continue // pin 必须指明榜单:「置顶到所有榜」不是一个有意义的意图
+				}
+				listID = anyList // veto 不写 value = 全站否决
+			}
+			target[workID][listID] = true
+		}
+	}
+	return out, rows.Err()
 }
 
 // sortedIDs work_id 的稳定升序 —— 所有跨 work 的循环都必须用它,不能遍历 map。
@@ -243,7 +313,7 @@ func (e *Engine) prior(dim Dim, p DimParams) float64 {
 // **证据等级字母不参与准入** —— 拿 grade=="D" 当全局闸门会把「pubdate 来自 mtime
 // 兜底」的书从明确不使用 F 维的榜单里一并踢掉(review B1,实测全库 23%)。
 func (e *Engine) selectList(p preset.Preset, ids []string, inputs map[string]*WorkInput,
-	dims map[string]map[Dim]DimScore) []ListEntry {
+	dims map[string]map[Dim]DimScore, manual ManualLists) []ListEntry {
 
 	weights := weightsByDim(p)
 	bands := bandsByDim(p)
@@ -252,20 +322,30 @@ func (e *Engine) selectList(p preset.Preset, ids []string, inputs map[string]*Wo
 	cands := make([]selection.Candidate, 0, len(ids))
 	for _, id := range ids {
 		w := inputs[id]
-		if !e.filterPass(p, w) {
+		if manual.Vetoed(id, p.ID) {
 			continue
 		}
-		if !NeedsSatisfied(dims[id], needs) {
-			continue
+		// 人工置顶绕过全部准入 —— 见 ManualLists 的说明。
+		pinned := manual.Pinned(id, p.ID)
+		if !pinned {
+			if !e.filterPass(p, w) {
+				continue
+			}
+			if !NeedsSatisfied(dims[id], needs) {
+				continue
+			}
 		}
 		cr := Combine(dims[id], weights, bands, needs)
+		facts := e.facts(p, w, dims[id], cr)
+		facts.Pinned = pinned
 		cands = append(cands, selection.Candidate{
 			WorkID:      id,
 			Topic:       w.PrimaryTopic,
 			FirstAuthor: w.FirstAuthor,
 			TBS:         cr.TBS,
 			Coverage:    cr.Coverage,
-			Facts:       e.facts(w, dims[id], cr),
+			Pinned:      pinned,
+			Facts:       facts,
 		})
 	}
 	entries := selection.Select(cands, selection.Config{
@@ -287,20 +367,30 @@ func (e *Engine) selectList(p preset.Preset, ids []string, inputs map[string]*Wo
 func (e *Engine) filterPass(p preset.Preset, w *WorkInput) bool {
 	f := p.Filters
 	// 「经历过时间检验」看最早版次:1996 年的经典出了 2024 年新版,它依然够老。
-	if f.MinAgeYears > 0 {
-		if w.FirstPubdate == nil || yearsSince(*w.FirstPubdate, e.Now) < float64(f.MinAgeYears) {
+	//
+	// ⚠️ 两个方向的时间过滤器刻意**不对称**,因为代价不对称:
+	//   「够不够新」(pubdate_within_months)日期未知 → 排除。想上「新书榜」得先证明自己新。
+	//   「够不够老」(min_age_years)  日期未知 → **不判失败**。
+	// 若这里也失败,那 477 本(23%)只有 mtime 兜底日期、且没有标识符可供 ingest 补救的书
+	// 会整批从「经典长青」消失 —— 那正是 review B1 判定为「模型错了」的那种全局闸门,
+	// 只不过换成从过滤器进来。个人技术书库里「有些年头了」本来就是默认状态,
+	// 误收一本两年新书的代价远小于丢掉 477 本经典。
+	// 要严格,preset 自己声明 `needs: {F: measured}` —— 那才是「我要求日期可信」的表达方式。
+	if f.MinAgeYears > 0 && w.FirstPubdate != nil {
+		if yearsSince(*w.FirstPubdate, e.Now) < float64(f.MinAgeYears) {
 			return false
 		}
 	}
-	// 「新书」看最新版次。用滚动窗口而不是硬编码年份,否则跨年后这个榜会
-	// 静默变成「去年的书」(review m3)。
+	// 「新书」看**可信**的最新版次日期,不是任意来源的最新日期 —— 一本 2015 年的书只要
+	// 还有一个版次的 pubdate 被 mtime 写成了今年,就能靠 LatestPubdate 混进这个榜。
+	// 用滚动窗口而不是硬编码年份,否则跨年后这个榜会静默变成「去年的书」(review m3)。
 	if f.PubdateWithinMonths > 0 {
-		if w.LatestPubdate == nil || w.LatestPubdate.Before(e.Now.AddDate(0, -f.PubdateWithinMonths, 0)) {
+		if w.TrustedPubdate == nil || w.TrustedPubdate.Before(e.Now.AddDate(0, -f.PubdateWithinMonths, 0)) {
 			return false
 		}
 	}
 	if f.PubdateYear > 0 {
-		if w.LatestPubdate == nil || w.LatestPubdate.Year() != f.PubdateYear {
+		if w.TrustedPubdate == nil || w.TrustedPubdate.Year() != f.PubdateYear {
 			return false
 		}
 	}
@@ -336,7 +426,9 @@ func (e *Engine) filterPass(p preset.Preset, w *WorkInput) bool {
 }
 
 // facts 组装理由串所需事实。
-func (e *Engine) facts(w *WorkInput, dims map[Dim]DimScore, cr CombineResult) selection.Facts {
+func (e *Engine) facts(p preset.Preset, w *WorkInput, dims map[Dim]DimScore,
+	cr CombineResult) selection.Facts {
+
 	f := selection.Facts{
 		Publisher:       w.PublisherNorm,
 		Author:          w.FirstAuthor,
@@ -347,6 +439,8 @@ func (e *Engine) facts(w *WorkInput, dims map[Dim]DimScore, cr CombineResult) se
 		Coverage:        cr.Coverage,
 		AvailableDims:   len(cr.Available),
 		TotalDims:       cr.TotalDims,
+		// 年龄下限对「日期未知」是放行的 —— 放行就得在理由串里写明。
+		AgeUnverified: p.Filters.MinAgeYears > 0 && w.FirstPubdate == nil,
 	}
 	if len(w.Mentions) > 0 {
 		times := make([]time.Time, 0, len(w.Mentions))
@@ -573,13 +667,18 @@ func (e *Engine) corpusID() (string, error) {
 }
 
 // factsHash 外部证据 + 标注 + 人工投入 + 阅读镜像的 hash。
+//
+// evidence 不含 `work_id`:一条外部证据的**事实**是 `(source, source_id, payload)`,
+// 「它属于哪个 work」是语料侧的信息(由 editions/works 的标识符决定,已被 corpus_id 覆盖)。
+// 把那一列算进来,会让「只改了书名」表现为 facts 变化,给升版 diff 评审添假信号。
 func (e *Engine) factsHash() (string, error) {
 	return e.hashQueries(
-		`SELECT source, source_id, work_id, payload FROM evidence ORDER BY source, source_id`,
+		`SELECT source, source_id, payload FROM evidence ORDER BY source, source_id`,
 		`SELECT work_id, topic_class, topics, level, depth, practicality, confidence
 		   FROM labels ORDER BY work_id`,
 		`SELECT work_id, object_id, created_at, matched_by FROM mentions ORDER BY work_id, object_id`,
 		`SELECT work_id, field, value FROM overrides ORDER BY work_id, field`,
+		`SELECT work_id, object_id, verdict FROM mention_overrides ORDER BY work_id, object_id`,
 		`SELECT book_id, status, shelves, downloads FROM reading ORDER BY book_id`,
 	)
 }
@@ -736,7 +835,10 @@ func (e *Engine) loadWorkInputs() (map[string]*WorkInput, error) {
 		if corpus.FormatRank(format) > corpus.FormatRank(w.Format) {
 			w.Format = format
 		}
-		if t, ok := parsePubdate(pubdate); ok {
+		// 污染来源的日期一条都不进聚合。mtime 兜底值按构造就落在「最近」,让它进
+		// First/Latest 会同时造成两种错:把老书塞进「近一年新书」,又把该上榜的老书
+		// 从 min_age_years 里挡掉(review A2)。
+		if t, ok := parsePubdate(pubdate); ok && PubdateUsableForAge(pubdateSrc.String) {
 			if w.FirstPubdate == nil || t.Before(*w.FirstPubdate) {
 				first := t
 				w.FirstPubdate = &first
@@ -800,20 +902,97 @@ func parsePubdate(v sql.NullString) (time.Time, bool) {
 	return t, true
 }
 
+// evidenceWorkIndex 外部实体 id → **当前** work_id。
+//
+// evidence 行按外部实体 id 存(volume id / OL work id / ISBN),但每行还记着写入当时的
+// work_id。而 work_id 是 `姓氏 + 规范标题` 的派生键 —— 在 calibre 里修一个书名 typo
+// 就会让它变,于是那本书的证据静默失联,且因为查询标记还新鲜,最长 180 天不会被重抓。
+// 「补元数据」恰恰是文档反复鼓励库主人做的事,这个动作本身不该打掉证据。
+//
+// 所以消费侧**读取时解析**:以 editions/works 里当前的标识符为准,`evidence.work_id`
+// 降级为兜底。这同时拆掉了「OL work id 升级聚类键」那颗地雷 —— 换聚类键不再让
+// evidence 整体失联。
+func (e *Engine) evidenceWorkIndex() (map[string]string, error) {
+	idx := map[string]string{}
+	// 首个命中优先 + 查询自带 ORDER BY = 确定性(NFR-10)。
+	put := func(key, workID string) {
+		if key == "" {
+			return
+		}
+		if _, seen := idx[key]; !seen {
+			idx[key] = workID
+		}
+	}
+	rows, err := e.DB.SQL().Query(`SELECT work_id, COALESCE(google_volume_id,''),
+			COALESCE(isbn13,'') FROM editions ORDER BY book_id`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var workID, volumeID, isbn string
+		if err := rows.Scan(&workID, &volumeID, &isbn); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		put(volumeID, workID)
+		put(isbn, workID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	wrows, err := e.DB.SQL().Query(
+		`SELECT work_id, COALESCE(ol_work_id,'') FROM works ORDER BY work_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer wrows.Close()
+	for wrows.Next() {
+		var workID, olID string
+		if err := wrows.Scan(&workID, &olID); err != nil {
+			return nil, err
+		}
+		put(olID, workID)
+		put(workID, workID) // HN 标记行的 source_id 就是 work_id
+	}
+	return idx, wrows.Err()
+}
+
+// resolveEvidenceWork 把一条 evidence 的 source_id 解析到当前 work;解析不出才用兜底值。
+func resolveEvidenceWork(idx map[string]string, sourceID, stored string) string {
+	if wid, ok := idx[sourceID]; ok {
+		return wid
+	}
+	// 兼容带前缀的键(`isbn:…` / `gvol:…`)。work_id 里不会出现冒号 ——
+	// normalizeTitle 已经把标点折成空白。
+	if i := strings.IndexByte(sourceID, ':'); i >= 0 {
+		if wid, ok := idx[sourceID[i+1:]]; ok {
+			return wid
+		}
+	}
+	return stored
+}
+
 // 下面四个加载器都带 ORDER BY:评分与提及衰减是浮点累加,加法次序会改变最低位。
 func (e *Engine) loadRatings(inputs map[string]*WorkInput) error {
+	idx, err := e.evidenceWorkIndex()
+	if err != nil {
+		return err
+	}
 	rows, err := e.DB.SQL().Query(
-		`SELECT source, work_id, payload FROM evidence ORDER BY source, source_id`)
+		`SELECT source, source_id, work_id, payload FROM evidence ORDER BY source, source_id`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var source, workID, payload string
-		if err := rows.Scan(&source, &workID, &payload); err != nil {
+		var source, sourceID, storedWorkID, payload string
+		if err := rows.Scan(&source, &sourceID, &storedWorkID, &payload); err != nil {
 			return err
 		}
-		w, ok := inputs[workID]
+		w, ok := inputs[resolveEvidenceWork(idx, sourceID, storedWorkID)]
 		if !ok {
 			continue
 		}
@@ -829,9 +1008,16 @@ func (e *Engine) loadRatings(inputs map[string]*WorkInput) error {
 	return rows.Err()
 }
 
+// loadMentions 载入 HN 提及。被人工否决的 objectID 直接不计入声量维 ——
+// 通用短标题("Clean Code"、"Refactoring")命中无关讨论是 R-3 里概率标「高」的风险,
+// mentions 保留 objectID 就是为了能逐条点开验证并否决,而在此之前没有任何生效路径。
 func (e *Engine) loadMentions(inputs map[string]*WorkInput) error {
 	rows, err := e.DB.SQL().Query(
-		`SELECT work_id, created_at FROM mentions ORDER BY work_id, object_id`)
+		`SELECT m.work_id, m.created_at FROM mentions m
+		 LEFT JOIN mention_overrides o
+		        ON o.work_id = m.work_id AND o.object_id = m.object_id
+		  WHERE COALESCE(o.verdict,'') <> 'reject'
+		  ORDER BY m.work_id, m.object_id`)
 	if err != nil {
 		return err
 	}

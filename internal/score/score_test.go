@@ -255,12 +255,15 @@ func TestEngineEndToEnd(t *testing.T) {
 		require.Equal(t, "unread", w.ReadStatus)
 		require.NotContains(t, w.Shelves, "弃读")
 	}
-	// 近一年新书:出版日期可信,且落在滚动窗口内。
+	// 近一年新书:窗口判定只认**可信**日期,所以断言也必须打在 TrustedPubdate 上
+	// —— 打在 LatestPubdate 上会漏掉「污染日期把老书顶进来」这整类失效(review A2)。
 	for _, en := range res.Lists["fresh-releases"] {
 		w := res.Works[en.WorkID]
 		require.NotNil(t, w.TrustedPubdate)
-		require.True(t, w.LatestPubdate.After(testNow.AddDate(-1, 0, 0)),
-			"%s 的最新版次不在近 12 个月内", en.WorkID)
+		require.True(t, w.TrustedPubdate.After(testNow.AddDate(-1, 0, 0)),
+			"%s 的可信出版日期不在近 12 个月内", en.WorkID)
+		require.True(t, PubdateUsableForAge(w.PubdateSource),
+			"%s 的日期来源 %q 不该被信任", en.WorkID, w.PubdateSource)
 	}
 }
 
@@ -281,9 +284,165 @@ func TestUntrustedPubdateStillEntersTimeless(t *testing.T) {
 		if en.WorkID == untrusted {
 			found = true
 			require.InDelta(t, 1.0, en.Coverage, 1e-9, "timeless 不加权 F → coverage 不该被扣")
+			// 出版日期不可信 → 年龄下限只能放行(见 filterPass 的不对称说明)。
+			// 放行必须说出来:一本出版日期不明的书不该以「经典」的名义静默上榜。
+			require.Contains(t, en.Reason, "年龄未核实",
+				"年龄下限对未知日期放行时,理由串必须披露")
 		}
 	}
 	require.True(t, found, "F 不可信但 A/C/T 齐备的书必须能进 timeless")
+}
+
+func TestPollutedPubdateCannotMakeOldBookLookNew(t *testing.T) {
+	// 生产形状:一本 2015 年的书有两个版次 —— 一个被 ingest 写上了可信的 google 日期,
+	// 另一个没有标识符,pubdate 是 snapshot 用文件 mtime 兜底出来的「今年」。
+	// mtime 兜底值按构造就落在最近,所以它绝不能参与「够不够新」的判定。
+	//
+	// 演示语料里那本 mtime 书的日期恰好是 2013,所以「污染日期被当真」这件事在测试里
+	// 看不出来 —— 而生产语料里污染值是 2026(477 本)。测试形状必须对齐生产(review A2)。
+	db := openTestDB(t)
+	const wid = "oldie/an old platform book"
+	mustExec(t, db, `INSERT INTO works
+		(work_id, canonical_title, first_author, primary_topic, level, half_life_years, half_life_source)
+		VALUES (?,?,?,?,?,?,?)`,
+		wid, "An Old Platform Book", "Olga Oldie", "平台/生态", "intermediate", 5.0, "rules-topic-class")
+	edition := func(bookID int, isbn, pubdate, source string) {
+		mustExec(t, db, `INSERT INTO editions
+			(book_id, work_id, title, isbn13, publisher_raw, publisher_norm, format, language,
+			 has_comments, has_cover, pubdate, pubdate_source)
+			VALUES (?,?,?,?,?,?,?,?,1,1,?,?)`,
+			bookID, wid, "An Old Platform Book", isbn, "O'Reilly Media", "O'Reilly Media",
+			"EPUB", "eng", pubdate, source)
+	}
+	edition(9001, "9780000000101", "2015-06-01", "google")         // 真实出版日期
+	edition(9002, "9780000000102", "2026-07-11", "mtime-fallback") // 文件 mtime 兜底
+
+	res, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+
+	w := res.Works[wid]
+	require.NotNil(t, w)
+	require.NotNil(t, w.TrustedPubdate)
+	require.Equal(t, "2015-06-01", w.TrustedPubdate.Format("2006-01-02"))
+	require.NotNil(t, w.LatestPubdate)
+	require.Equal(t, "2015-06-01", w.LatestPubdate.Format("2006-01-02"),
+		"被污染的来源一条都不该进日期聚合")
+
+	require.NotContains(t, workIDsOf(res.Lists["fresh-releases"]), wid,
+		"2015 年的书不能因为某个版次的 mtime 兜底日期进「近一年新书」")
+}
+
+func TestEvidenceSurvivesWorkKeyChange(t *testing.T) {
+	// work_id 是「姓氏 + 规范标题」的派生键:在 calibre 里修一个书名 typo 就会让它变。
+	// 若证据按写入时的 work_id 绑定,这本书的口碑维会静默消失 —— 而查询标记还新鲜,
+	// 最长 180 天不会被重抓。偏偏「补元数据」正是文档反复鼓励库主人做的事(review A4)。
+	db := openTestDB(t)
+	const oldID = "kleppmann/designing data intensive applications"
+	const newID = "kleppmann/designing data intensive applications revised"
+
+	base, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+	require.Equal(t, StateMeasured, base.Dims[oldID][DimAcclaim].State, "前提:改名前口碑维是实测的")
+
+	// 模拟改名:新建 work(沿用同一个 OL work id)、把版次挪过去、删掉旧 work。
+	// evidence 那几行**保持指向旧 work_id** —— 这正是要验证的场景。
+	mustExec(t, db, `INSERT INTO works SELECT ?, canonical_title || ' Revised', first_author,
+		ol_work_id, primary_topic, level, half_life_years, half_life_source
+		FROM works WHERE work_id=?`, newID, oldID)
+	mustExec(t, db, `UPDATE editions SET work_id=? WHERE work_id=?`, newID, oldID)
+	mustExec(t, db, `DELETE FROM works WHERE work_id=?`, oldID)
+
+	var stale int
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT COUNT(*) FROM evidence WHERE work_id=?`, oldID).Scan(&stale))
+	require.Positive(t, stale, "前提:evidence 仍指向旧 work_id —— 验的是读取时解析,不是数据迁移")
+
+	res, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+	require.Equal(t, StateMeasured, res.Dims[newID][DimAcclaim].State,
+		"改名后证据必须仍解析得到,否则「补元数据」这个动作本身会打掉证据")
+	require.InDelta(t, base.Dims[oldID][DimAcclaim].Raw, res.Dims[newID][DimAcclaim].Raw, 1e-9,
+		"Google(按 ISBN 键)与 OpenLibrary(按 work id 键)两条解析路径都要通")
+}
+
+// ---------- 人工干预(overrides / mention_overrides)----------
+
+func TestMentionVetoRemovesRejectedObjectID(t *testing.T) {
+	// R-3 的兜底:通用短标题会命中无关讨论,mentions 保留 objectID 正是为了能逐条否决,
+	// 而在此之前没有任何生效路径 —— 唯一的处置办法是改代码。
+	db := openTestDB(t)
+	const wid = "kleppmann/designing data intensive applications"
+	base, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+	before := len(base.Works[wid].Mentions)
+	require.Positive(t, before)
+
+	obj := queryStr(t, db, `SELECT object_id FROM mentions WHERE work_id=? ORDER BY object_id LIMIT 1`, wid)
+	mustExec(t, db, `INSERT INTO mention_overrides (work_id, object_id, verdict, reason, at)
+		VALUES (?,?, 'reject', '误匹配', '2026-08-05T00:00:00Z')`, wid, obj)
+
+	after, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+	require.Equal(t, before-1, len(after.Works[wid].Mentions), "被否决的提及不该计入声量维")
+	require.NotEqual(t, base.FactsHash, after.FactsHash, "人工否决属于事实变化,必须进 facts_hash")
+}
+
+func TestManualPinBypassesAdmissionAndIsDisclosed(t *testing.T) {
+	// system-design §13 要库主人决定「timeless 是否接受一层人工 curation」——
+	// 在此之前想选「接受」也没有开关可拨(review B6)。
+	db := openTestDB(t)
+	const wid = "unknown/the mystery systems book" // 无外部评分 → 达不到 timeless 的 needs
+	base, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+	require.NotEqual(t, StateMeasured, base.Dims[wid][DimAcclaim].State,
+		"前提:这本书本来进不了 timeless")
+	require.NotContains(t, workIDsOf(base.Lists["timeless"]), wid)
+
+	mustExec(t, db, `INSERT INTO overrides (work_id, field, value, reason, at)
+		VALUES (?, 'pin', 'timeless', '库主人愿意为它的排名辩护', '2026-08-05T00:00:00Z')`, wid)
+	res, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+
+	entries := res.Lists["timeless"]
+	require.NotEmpty(t, entries)
+	require.Equal(t, wid, entries[0].WorkID, "置顶项排在算法结果之前")
+	require.Contains(t, entries[0].Reason, "人工置顶", "curation 不该伪装成算法结果")
+	// 置顶不该顺手放宽其他书的准入。
+	for _, en := range entries[1:] {
+		require.GreaterOrEqual(t, en.Coverage+1e-9, 0.7)
+	}
+}
+
+func TestManualVetoRemovesFromAllLists(t *testing.T) {
+	db := openTestDB(t)
+	base, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+	victim := base.Lists["timeless"][0].WorkID
+
+	mustExec(t, db, `INSERT INTO overrides (work_id, field, value, reason, at)
+		VALUES (?, 'veto', '', '不该出现在公开榜上', '2026-08-05T00:00:00Z')`, victim)
+	res, err := NewEngine(db, "1.0", testNow).Run(loadPresets(t))
+	require.NoError(t, err)
+	for listID, entries := range res.Lists {
+		require.NotContains(t, workIDsOf(entries), victim,
+			"value 留空 = 全站否决,但榜 %s 里仍然出现", listID)
+	}
+}
+
+func TestManualVetoValueAcceptsCommaSeparatedLists(t *testing.T) {
+	// overrides 的主键是 (work_id, field),一个 work 每种操作只有一行 —— 所以 value
+	// 必须支持逗号分隔,否则「只否决这两份榜」根本无法表达。
+	db := openTestDB(t)
+	mustExec(t, db, `INSERT INTO overrides (work_id, field, value, reason, at)
+		VALUES ('w/x', 'veto', 'timeless, deep-dive', '这两份榜不合适', '2026-08-05T00:00:00Z')`)
+
+	manual, err := NewEngine(db, "1.0", testNow).loadManualLists()
+	require.NoError(t, err)
+	require.True(t, manual.Vetoed("w/x", "timeless"))
+	require.True(t, manual.Vetoed("w/x", "deep-dive"), "逗号后带空格的榜 id 也要生效")
+	require.False(t, manual.Vetoed("w/x", "to-read-next"), "没被点名的榜不受影响")
+	require.False(t, manual.Vetoed("other/work", "timeless"))
+	require.False(t, manual.Pinned("w/x", "timeless"), "veto 不该被读成 pin")
 }
 
 func TestRunGCKeepsOnlyRecentRuns(t *testing.T) {
@@ -349,6 +508,27 @@ func loadPresets(t *testing.T) []preset.Preset {
 	presets, err := preset.Load()
 	require.NoError(t, err)
 	return presets
+}
+
+func mustExec(t *testing.T, db *store.DB, query string, args ...any) {
+	t.Helper()
+	_, err := db.SQL().Exec(query, args...)
+	require.NoError(t, err)
+}
+
+func queryStr(t *testing.T, db *store.DB, query string, args ...any) string {
+	t.Helper()
+	var v string
+	require.NoError(t, db.SQL().QueryRow(query, args...).Scan(&v))
+	return v
+}
+
+func workIDsOf(entries []ListEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, en := range entries {
+		out = append(out, en.WorkID)
+	}
+	return out
 }
 
 func openTestDB(t *testing.T) *store.DB {

@@ -23,8 +23,15 @@ type Facts struct {
 	Grade            string
 	Coverage         float64
 	AvailableDims    int
-	TotalDims        int      // 该 preset 加权的维度总数
-	Missing          []string // "时效—出版日期不可信" 这类确定性描述
+	TotalDims        int // 该 preset 加权的维度总数
+	// AgeUnverified 这份榜有年龄下限,但这本书的出版日期不可信 → 年龄没被核对过。
+	// 过滤器对「日期未知」是放行的(见 score.filterPass 的不对称说明),放行就必须
+	// 说出来 —— 否则一本出版日期不明的书会以「经典」的名义静默上榜。
+	AgeUnverified bool
+	// Pinned 人工置顶。必须出现在理由串里:curation 不该伪装成算法结果 ——
+	// 「可解释」这条承诺的全部价值就在于读者能分清哪部分是算出来的。
+	Pinned  bool
+	Missing []string // "时效—出版日期不可信" 这类确定性描述
 }
 
 // Candidate 一个待选 work。
@@ -34,7 +41,9 @@ type Candidate struct {
 	FirstAuthor string
 	TBS         float64
 	Coverage    float64
-	Facts       Facts
+	// Pinned 人工置顶:排在算法结果之前,且不受 coverage 与多样性约束限制。
+	Pinned bool
+	Facts  Facts
 }
 
 // Config 选材约束(system-design §5 默认:size 20 / max_per_topic 2 / max_per_author 1)。
@@ -68,6 +77,11 @@ func Select(cands []Candidate, cfg Config) []Entry {
 	sorted := make([]Candidate, len(cands))
 	copy(sorted, cands)
 	sort.SliceStable(sorted, func(i, j int) bool {
+		// 人工置顶整体排在算法结果之前。pin 表达的是「我为这个排名辩护」,
+		// 不是给它加权 —— 所以它不参与分数比较,而是换一个层级。
+		if sorted[i].Pinned != sorted[j].Pinned {
+			return sorted[i].Pinned
+		}
 		if sorted[i].TBS != sorted[j].TBS {
 			if cfg.Asc {
 				return sorted[i].TBS < sorted[j].TBS
@@ -84,18 +98,22 @@ func Select(cands []Candidate, cfg Config) []Entry {
 	perTopic := map[string]int{}
 	perAuthor := map[string]int{}
 	for _, c := range sorted {
-		if c.Coverage < cfg.MinCoverage {
-			continue
-		}
-		if perTopic[c.Topic] >= cfg.MaxPerTopic {
-			continue
-		}
 		author := c.FirstAuthor
 		if author == "" {
 			author = "unknown"
 		}
-		if perAuthor[author] >= cfg.MaxPerAuthor {
-			continue
+		// 置顶项跳过三道约束,但**照样计入**下面的计数器:后续算法选出的书仍要
+		// 相对置顶项保持多样性,否则 pin 一本 Kubernetes 书就会引来第二本。
+		if !c.Pinned {
+			if c.Coverage < cfg.MinCoverage {
+				continue
+			}
+			if perTopic[c.Topic] >= cfg.MaxPerTopic {
+				continue
+			}
+			if perAuthor[author] >= cfg.MaxPerAuthor {
+				continue
+			}
 		}
 		out = append(out, Entry{WorkID: c.WorkID, TBS: c.TBS, Coverage: c.Coverage, Reason: Reason(c.Facts)})
 		perTopic[c.Topic]++
@@ -107,9 +125,13 @@ func Select(cands []Candidate, cfg Config) []Entry {
 	return out
 }
 
-// Reason 确定性理由串。顺序固定:出版社 → 作者 → HN 提及 → 半衰期 → 深度 → 覆盖 → 缺失。
+// Reason 确定性理由串。顺序固定:
+// 人工置顶 → 出版社 → 作者 → HN 提及 → 半衰期 → 深度 → 覆盖 → 年龄未核实 → 缺失。
 func Reason(f Facts) string {
 	parts := []string{}
+	if f.Pinned {
+		parts = append(parts, "人工置顶")
+	}
 	if f.Publisher != "" && f.Publisher != "unknown" {
 		parts = append(parts, f.Publisher)
 	}
@@ -133,6 +155,9 @@ func Reason(f Facts) string {
 	// 写成「按 5/7 维评出」会被读成缺了两维。
 	if f.TotalDims > 0 {
 		parts = append(parts, fmt.Sprintf("按 %d/%d 维评出", f.AvailableDims, f.TotalDims))
+	}
+	if f.AgeUnverified {
+		parts = append(parts, "出版日期不可信,年龄未核实")
 	}
 	if len(f.Missing) > 0 {
 		parts = append(parts, "缺："+strings.Join(f.Missing, "、"))

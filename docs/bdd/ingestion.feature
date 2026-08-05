@@ -1,5 +1,5 @@
 # language: zh-CN
-# 覆盖: FR-10~17 | NFR-9, NFR-13, NFR-16, NFR-17 | AC-P1
+# 覆盖: FR-10~17 | NFR-9, NFR-13, NFR-16, NFR-18 | AC-P1
 @P0
 功能: 数据接入
   作为运维

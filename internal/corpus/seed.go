@@ -129,11 +129,16 @@ func Seed(d *store.DB) (int, error) {
 	defer tx.Rollback()
 
 	seenWorks := map[string]bool{}
+	// OpenLibrary 的评分是 **work 级**的,生产里 evidence 就按 OL work id 存。
+	// 演示语料也照这个形状来,否则「按外部实体 id 存 + 读取时解析」这条生产路径
+	// 在测试里根本没被走到(review m1)。id 由固定的 seedBooks 顺序派生 → 确定性。
+	workOLID := map[string]string{}
 	written := 0
 	for _, b := range seedBooks {
 		workID := WorkKey(b.title, b.author)
 		if !seenWorks[workID] {
 			seenWorks[workID] = true
+			workOLID[workID] = fmt.Sprintf("OL%dW", 900001+written)
 			hl := HalfLifeFor(b.title, b.topicClass, nil)
 			if _, err := tx.Exec(`INSERT OR IGNORE INTO works
 				(work_id, canonical_title, first_author, primary_topic, level, half_life_years, half_life_source)
@@ -160,22 +165,32 @@ func Seed(d *store.DB) (int, error) {
 			return 0, err
 		}
 
-		// 外部证据:Google Books / OpenLibrary,原样存 JSON + fetched_at(TTL 180 天)。
+		// 外部证据:Google Books / OpenLibrary,原样存 JSON + fetched_at(评分类 TTL 30 天)。
 		if b.gbCount > 0 {
 			payload, _ := json.Marshal(map[string]any{"rating": b.gbRating, "count": b.gbCount})
+			// 两种键形都留在语料里,好让读取时解析的两条路径都被走到:
+			// 有 google id 的走裸 volume id(生产的主形状),其余走 `isbn:` 前缀。
 			srcID := b.googleID
 			if srcID == "" {
 				srcID = "isbn:" + b.isbn13
 			}
 			if _, err := tx.Exec(`INSERT OR IGNORE INTO evidence (source, source_id, work_id, payload, fetched_at, ttl_days)
-				VALUES ('google_books', ?, ?, ?, ?, 180)`, srcID, workID, string(payload), now.Format(time.RFC3339)); err != nil {
+				VALUES ('google_books', ?, ?, ?, ?, 30)`, srcID, workID, string(payload), now.Format(time.RFC3339)); err != nil {
 				return 0, err
 			}
 		}
 		if b.olCount > 0 {
+			// 按 OL work id 存(生产形状),并把 work id 写进 works —— 它是聚类键的
+			// 最高优先级,也是「只刷第二跳」那条短路径的依据。
+			olID := workOLID[workID]
+			if _, err := tx.Exec(
+				`UPDATE works SET ol_work_id=? WHERE work_id=? AND COALESCE(ol_work_id,'')=''`,
+				olID, workID); err != nil {
+				return 0, err
+			}
 			payload, _ := json.Marshal(map[string]any{"rating": b.olRating, "count": b.olCount})
 			if _, err := tx.Exec(`INSERT OR IGNORE INTO evidence (source, source_id, work_id, payload, fetched_at, ttl_days)
-				VALUES ('openlibrary', ?, ?, ?, ?, 180)`, "isbn:"+b.isbn13, workID, string(payload), now.Format(time.RFC3339)); err != nil {
+				VALUES ('openlibrary', ?, ?, ?, ?, 30)`, olID, workID, string(payload), now.Format(time.RFC3339)); err != nil {
 				return 0, err
 			}
 		}

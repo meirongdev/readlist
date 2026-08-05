@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/meirongdev/readlist/internal/store"
@@ -44,19 +45,19 @@ type Config struct {
 
 // Stats 一次摄入的结果,用于日志与 runs.quota_used。
 type Stats struct {
-	Requests          int `json:"requests"`
-	Throttled         int `json:"throttled"`
-	CacheHits         int `json:"cache_hits"`
-	EditionsSeen      int `json:"editions_seen"`
-	GoogleFound       int `json:"google_found"`
-	OpenLibraryFound  int `json:"openlibrary_found"`
-	OLWorkIDs         int `json:"ol_work_ids"`
-	MentionsFound     int `json:"mentions_found"`
-	PubdatesWritten   int `json:"pubdates_written"`
-	SkippedNoID       int `json:"skipped_no_identifier"`
-	SkippedShortTitle int `json:"skipped_short_title"`
-	Errors            int `json:"errors"`
-	BudgetExhausted   bool
+	Requests          int  `json:"requests"`
+	Throttled         int  `json:"throttled"`
+	CacheHits         int  `json:"cache_hits"`
+	EditionsSeen      int  `json:"editions_seen"`
+	GoogleFound       int  `json:"google_found"`
+	OpenLibraryFound  int  `json:"openlibrary_found"`
+	OLWorkIDs         int  `json:"ol_work_ids"`
+	MentionsFound     int  `json:"mentions_found"`
+	PubdatesWritten   int  `json:"pubdates_written"`
+	SkippedNoID       int  `json:"skipped_no_identifier"`
+	SkippedShortTitle int  `json:"skipped_short_title"`
+	Errors            int  `json:"errors"`
+	BudgetExhausted   bool `json:"budget_exhausted"`
 }
 
 // Ingester 摄入器。
@@ -69,6 +70,9 @@ type Ingester struct {
 	fresh map[string]bool
 	// whitelist ≤2 词标题的人工白名单(title_whitelist 表)。
 	whitelist map[string]bool
+	// olWorkIDs work_id → OpenLibrary work id(第一跳的结果)。
+	// 有了它,「ISBN→work 映射还新鲜、但评分已过期」时可以只重发第二跳。
+	olWorkIDs map[string]string
 }
 
 // Ingest 摄入外部证据。任何单本书的失败都不会中断整轮 —— 外部源本来就不可靠,
@@ -88,19 +92,51 @@ func Ingest(d *store.DB, cfg Config) (Stats, error) {
 		client:    newClient(cfg.Budget, cfg.Sleep),
 		fresh:     map[string]bool{},
 		whitelist: map[string]bool{},
+		olWorkIDs: map[string]string{},
 	}
-	if err := i.loadCacheState(); err != nil {
-		return i.stats, err
-	}
-	if err := i.ingestEditions(); err != nil {
-		return i.stats, err
-	}
-	if err := i.ingestMentions(); err != nil {
-		return i.stats, err
-	}
+	err := i.ingest()
 	i.stats.Requests = i.client.used
 	i.stats.Throttled = i.client.throttled
-	return i.stats, nil
+	// 无论成败都记一条 run:`score` 在陈旧 facts 上每晚照样成功,所以
+	// `last_score` 常绿并不能说明数据是新的 —— 「摄入什么时候最后一次成功」必须
+	// 自己有痕迹,否则 snapshot/ingest 挂掉一个月都不会有任何警报(review B1)。
+	// pod 日志不算痕迹:successfulJobsHistoryLimit=1 会把它滚掉。
+	if wErr := i.writeRun(err); wErr != nil {
+		slog.Error("写 ingest run 失败", "err", wErr)
+	}
+	return i.stats, err
+}
+
+func (i *Ingester) ingest() error {
+	if err := i.loadCacheState(); err != nil {
+		return err
+	}
+	if err := i.ingestEditions(); err != nil {
+		return err
+	}
+	return i.ingestMentions()
+}
+
+// writeRun 把本次摄入记进 runs(kind='ingest'),供 /metrics 与配额管理消费。
+func (i *Ingester) writeRun(runErr error) error {
+	status := "ok"
+	if runErr != nil {
+		status = "failed"
+	}
+	metrics, err := json.Marshal(i.stats)
+	if err != nil {
+		return err
+	}
+	stamp := i.cfg.Now.Format(time.RFC3339Nano)
+	_, err = i.db.SQL().Exec(`INSERT OR REPLACE INTO runs
+		(run_id, kind, corpus_id, standard_version, facts_hash, started_at, ended_at, status,
+		 ok_count, fail_count, orphan_rows, quota_used, metrics)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		fmt.Sprintf("ingest-%d", i.cfg.Now.UnixNano()), "ingest", "", "", "",
+		stamp, stamp, status,
+		i.stats.GoogleFound+i.stats.OpenLibraryFound, i.stats.Errors, 0,
+		strconv.Itoa(i.stats.Requests), string(metrics))
+	return err
 }
 
 // loadCacheState 读出还新鲜的缓存键与人工白名单。
@@ -141,7 +177,24 @@ func (i *Ingester) loadCacheState() error {
 		}
 		i.whitelist[id] = true
 	}
-	return wl.Err()
+	if err := wl.Err(); err != nil {
+		return err
+	}
+
+	ol, err := i.db.SQL().Query(
+		`SELECT work_id, ol_work_id FROM works WHERE COALESCE(ol_work_id,'') <> ''`)
+	if err != nil {
+		return err
+	}
+	defer ol.Close()
+	for ol.Next() {
+		var workID, olID string
+		if err := ol.Scan(&workID, &olID); err != nil {
+			return err
+		}
+		i.olWorkIDs[workID] = olID
+	}
+	return ol.Err()
 }
 
 func (i *Ingester) isFresh(source, sourceID string) bool {
@@ -222,9 +275,13 @@ func (i *Ingester) tolerable(err error) bool {
 }
 
 func (i *Ingester) fetchGoogleFor(c candidate) error {
-	queryKey := "gvol:" + c.GoogleID
-	if c.GoogleID == "" {
-		queryKey = "isbn:" + c.ISBN13
+	// ⚠️ 查询标记的键必须是**摄入自己不会改写**的标识符,所以优先用 ISBN。
+	// 反过来(优先 google id)会自我失效:下面我们会把查出来的 volume id 写回
+	// editions,于是下一晚同一个版次算出的键就变了 → 标记全部落空 → 明明刚查过的书
+	// 被重查一遍。取哪个键与用哪条路径去查是两件事 —— fetchGoogle 仍然优先直取 volume。
+	queryKey := "isbn:" + c.ISBN13
+	if c.ISBN13 == "" {
+		queryKey = "gvol:" + c.GoogleID
 	}
 	if i.isFresh(sourceGoogleQuery, queryKey) {
 		i.stats.CacheHits++
@@ -235,14 +292,36 @@ func (i *Ingester) fetchGoogleFor(c candidate) error {
 		return err
 	}
 	// 先写查询标记(不管有没有命中),这样"查不到"也只花一次配额。
+	//
+	// 命中时标记只能活到**评分 TTL**:Google 一次请求同时返回 volume id 与评分,
+	// 所以把「映射」缓存得比「评分」更久没有任何收益 —— 不重发这个请求,评分就刷不了。
+	// 之前统一用 180 天,后果是评分类 30 天 TTL 从来没被求值过,榜单实际半年才更新一次。
+	// 查不到则压 180 天:没有东西可刷,只需要记住"别再问了"。
+	markerTTL := i.cfg.MetaTTLDays
+	if found {
+		markerTTL = i.cfg.RatingsTTLDays
+	}
 	marker := map[string]any{"found": found, "volume_id": vol.ID, "queried": queryKey}
-	if err := i.putEvidence(sourceGoogleQuery, queryKey, c.WorkID, marker, i.cfg.MetaTTLDays); err != nil {
+	if err := i.putEvidence(sourceGoogleQuery, queryKey, c.WorkID, marker, markerTTL); err != nil {
 		return err
 	}
 	if !found {
 		return nil
 	}
 	i.stats.GoogleFound++
+
+	// 把 ISBN 查出来的 volume id 落库。两个收益:下次可以直取 volume(省掉一次搜索),
+	// 且评分行的键(volume id)从此能被**读取时**解析回这个 work —— 否则那 715 本走
+	// ISBN 路径的书,其评分只能靠 `evidence.work_id` 这个会随书名变动而失效的快照
+	// (见 score.evidenceWorkIndex)。
+	if vol.ID != "" && c.GoogleID == "" {
+		if _, err := i.db.SQL().Exec(
+			`UPDATE editions SET google_volume_id=?
+			  WHERE book_id=? AND COALESCE(google_volume_id,'')=''`,
+			vol.ID, c.BookID); err != nil {
+			return fmt.Errorf("写 google_volume_id book=%d: %w", c.BookID, err)
+		}
+	}
 
 	// 评分行按 volume id 存:两个版次指向同一 volume 时自然合成一行,不会把同一份
 	// 评分计两遍。ratingsCount 为 0 时也存,靠 count<=0 让评分引擎忽略它。
@@ -273,7 +352,9 @@ func (i *Ingester) fetchOpenLibraryFor(c candidate) error {
 	queryKey := "isbn:" + c.ISBN13
 	if i.isFresh(sourceOLQuery, queryKey) {
 		i.stats.CacheHits++
-		return nil
+		// OL 是**两跳**:ISBN→work 的映射确实稳定(180 天),但评分是 30 天 TTL。
+		// 之前在这里直接 return,于是第二跳永远不会发生,评分实际 180 天才刷一次。
+		return i.refreshOpenLibraryRatings(c.WorkID)
 	}
 	ed, found, err := i.fetchOpenLibraryEdition(c.ISBN13)
 	if err != nil {
@@ -300,12 +381,16 @@ func (i *Ingester) fetchOpenLibraryFor(c candidate) error {
 	if workKey == "" {
 		return nil
 	}
-	// OL work id 是聚类键的最高优先级(system-design §4),存下来供后续升级聚类用。
+	// OL work id 是聚类键的最高优先级(system-design §4),存下来供后续升级聚类用,
+	// 也让「只刷第二跳」这条短路径有据可依。
 	olID := olWorkID(workKey)
 	if _, err := i.db.SQL().Exec(
 		`UPDATE works SET ol_work_id=? WHERE work_id=? AND COALESCE(ol_work_id,'')=''`,
 		olID, c.WorkID); err != nil {
 		return err
+	}
+	if _, ok := i.olWorkIDs[c.WorkID]; !ok {
+		i.olWorkIDs[c.WorkID] = olID
 	}
 	i.stats.OLWorkIDs++
 
@@ -314,7 +399,25 @@ func (i *Ingester) fetchOpenLibraryFor(c candidate) error {
 		i.stats.CacheHits++
 		return nil
 	}
-	r, ok, err := i.fetchOpenLibraryRatings(workKey)
+	return i.fetchOLRatings(c.WorkID, olID)
+}
+
+// refreshOpenLibraryRatings 只重发第二跳:第一跳的结果(ol_work_id)已经存着了。
+func (i *Ingester) refreshOpenLibraryRatings(workID string) error {
+	olID := i.olWorkIDs[workID]
+	if olID == "" {
+		return nil // 第一跳没拿到 work key(或该 ISBN 本就查不到)→ 没有可刷的东西
+	}
+	if i.isFresh(sourceOpenLibrary, olID) {
+		i.stats.CacheHits++
+		return nil
+	}
+	return i.fetchOLRatings(workID, olID)
+}
+
+// fetchOLRatings 取一个 OL work 的评分并按 work id 缓存(评分 TTL)。
+func (i *Ingester) fetchOLRatings(workID, olID string) error {
+	r, ok, err := i.fetchOpenLibraryRatings("/works/" + olID)
 	if err != nil {
 		return err
 	}
@@ -323,7 +426,7 @@ func (i *Ingester) fetchOpenLibraryFor(c candidate) error {
 		"count":  r.Summary.Count,
 		"raw":    map[string]any{"found": ok, "work": olID},
 	}
-	return i.putEvidence(sourceOpenLibrary, olID, c.WorkID, payload, i.cfg.RatingsTTLDays)
+	return i.putEvidence(sourceOpenLibrary, olID, workID, payload, i.cfg.RatingsTTLDays)
 }
 
 // ingestMentions 打 HN,产出 mentions 行。

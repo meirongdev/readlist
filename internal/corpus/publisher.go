@@ -71,11 +71,24 @@ func normalize(raw string) string {
 	return b.String()
 }
 
+// UnknownPublisher 无出版社的规范名。它同时是 Publisher 的**输出**与合法**输入** ——
+// 见 Publisher 的幂等性说明。
+const UnknownPublisher = "unknown"
+
 // Publisher 把原始出版社名归一为规范名 + tier。
+//
+// ⚠️ 这个函数必须**幂等**:`Publisher(Publisher(x).Norm) ≡ Publisher(x)`。
+// 归一结果会先落进 `editions.publisher_norm`,评分引擎与展示层再拿那一列**二次归一**,
+// 所以任何「输出喂回输入会换一个答案」的取值都是 bug。曾经踩到的那个:空出版社归一成
+// 字符串 "unknown"(tier 4)落库,二次归一时 `n != ""` 且表里没有哪个 key 是它的子串,
+// 于是掉进最后那条「表外但有名字」→ **tier 3 + T 维 state=measured**。后果是约 700 本
+// 连出版社都没有的书拿到 40 分实测权威分,既绕过了 `needs: {T: measured}` 硬门,
+// 又给 T 维的 measured CDF 注入了 700 个并列值 —— 正是 §3 明令排除的那种并列平台。
 func Publisher(raw string) PublisherInfo {
 	n := normalize(raw)
-	if n == "" {
-		return PublisherInfo{Norm: "unknown", Tier: 4}
+	// 空串与 "unknown" 是同一件事:没有出版社。分开处理就会破坏幂等。
+	if n == "" || n == UnknownPublisher {
+		return PublisherInfo{Norm: UnknownPublisher, Tier: 4}
 	}
 	for _, p := range publisherTiers {
 		if strings.Contains(n, p.key) {

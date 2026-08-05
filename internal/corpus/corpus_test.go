@@ -2,9 +2,11 @@ package corpus
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/meirongdev/readlist/internal/calibre"
 	"github.com/meirongdev/readlist/internal/store"
 )
 
@@ -50,6 +52,60 @@ func TestPublisherNormalizesVariants(t *testing.T) {
 	}
 	require.Equal(t, 4, Publisher("").Tier)
 	require.Equal(t, "unknown", Publisher("   ").Norm)
+}
+
+func TestPublisherNormalizationIsIdempotent(t *testing.T) {
+	// 归一结果先落进 editions.publisher_norm,评分引擎与展示层再拿那一列**二次归一**。
+	// 所以 Publisher 必须幂等,否则输出喂回输入会换一个答案。
+	//
+	// 踩过的那个:空出版社归一成字符串 "unknown"(tier 4)落库,二次归一时 n != "" 且
+	// 表里没有哪个 key 是它的子串,于是掉进「表外但有名字」→ tier 3 + T 维 measured。
+	// 实测出版社覆盖率 66%,意味着约 700 本无出版社的书凭这个 bug 拿到 40 分实测权威分:
+	// 既绕过 needs: {T: measured} 硬门,又给 T 维的 measured CDF 注入 700 个并列值。
+	for _, raw := range []string{
+		"", "   ", "unknown", "O'Reilly", "O'Reilly Media, Inc.", "Packt Publishing Ltd",
+		"CRC Press", "Taylor & Francis", "电子工业出版社", "self-published", "Genever Benning",
+	} {
+		once := Publisher(raw)
+		twice := Publisher(once.Norm)
+		require.Equal(t, once, twice, "Publisher(%q) 不幂等:%+v → %+v", raw, once, twice)
+	}
+	// 没有出版社就是没有 —— 不能因为规范名叫 "unknown" 就被当成一个出版社。
+	require.Equal(t, 4, Publisher("unknown").Tier)
+	require.Equal(t, 4, Publisher(Publisher("").Norm).Tier)
+}
+
+func TestImportPrefersManualPublisherOverride(t *testing.T) {
+	// publisher_map 此前是只写不读的:每夜被内置规则表覆盖,却又被列为「不可再生、
+	// 必须夜备」。现在 source='manual' 的行是导入时的覆盖源,且永不被规则覆盖(review B5)。
+	db, err := store.Open(t.TempDir() + "/t.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// 内置表认不出的变体 → 人工映射到一个规则表已知的规范名,tier 由规范名推出。
+	_, err = db.SQL().Exec(`INSERT INTO publisher_map (raw, norm, tier, source)
+		VALUES ('Assoc. of Odd Publishers', 'O''Reilly Media', 1, 'manual')`)
+	require.NoError(t, err)
+
+	snap := &calibre.Snapshot{Books: []calibre.Book{
+		{BookID: 1, Title: "A Book", Authors: []string{"Some Author"},
+			Publisher: "Assoc. of Odd Publishers", Formats: []string{"EPUB"},
+			Pubdate: "2020-01-01", PubdateSource: calibre.SourceCalibre},
+	}}
+	st, err := Import(db, snap, time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.Equal(t, 1, st.PublisherOverrides, "命中人工归一的版次数要计入统计")
+
+	var norm string
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT publisher_norm FROM editions WHERE book_id=1`).Scan(&norm))
+	require.Equal(t, "O'Reilly Media", norm, "人工归一必须优先于内置规则表")
+
+	// 人工行不能被当夜的规则写回覆盖掉。
+	var source string
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT source FROM publisher_map WHERE raw='Assoc. of Odd Publishers'`).Scan(&source))
+	require.Equal(t, "manual", source)
 }
 
 func TestPublisherHandlesChineseNames(t *testing.T) {
