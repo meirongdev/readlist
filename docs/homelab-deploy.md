@@ -81,13 +81,52 @@
 ## 4. 上线顺序
 
 ```
-3.1 homelab 清单 + 备份归属   ──┐
-                                ├──► 首次 snapshot ──► ingest ×2 晚 ──► 3.3 限流/监控 ──► 公开
-CI 打 tag → ghcr 有镜像       ──┘
+CI 打 tag → ghcr 有镜像 ──┐
+                          ├──► 应用清单(先不建 HTTPRoute)──► 手动引导 ──► 核对 ──► 建 HTTPRoute 公开
+homelab 清单 + 备份归属 ──┘
 ```
 
-**建议先只开 `publisher-picks`(内部榜)看一眼真实语料的样子**,确认出版社归一、
-work 聚类、孤儿数都正常,再放 ingest 与公开榜。
+### 4.1 ⚠️ 必须手动引导一次,否则站点会空一整天
+
+三个 CronJob 分别在 01:05 / 01:20 / 01:40 触发。**清单一应用,`serve` 会在空库上
+自愈打分一次并发布一个 0 本书的 run** —— 不崩、全部 200,但站点是空的,
+要等到次日凌晨才有内容。所以第一次部署后立刻按顺序跑一遍:
+
+```bash
+K="kubectl --context oracle-k3s -n personal-services"
+
+# 1) 快照:秒级。先看孤儿行数与 pubdate 污染计数是否符合预期
+$K create job bootstrap-snapshot --from=cronjob/readlist-snapshot
+$K wait --for=condition=complete job/bootstrap-snapshot --timeout=300s
+$K logs job/bootstrap-snapshot
+
+# 2) 打分:此时只有 T 与 readability 两维,先确认 publisher-picks 出得来
+$K create job bootstrap-score --from=cronjob/readlist-score
+$K wait --for=condition=complete job/bootstrap-score --timeout=300s
+$K logs job/bootstrap-score
+
+# 3) 核对无误后再摄入外部证据(约 800 次请求,10–15 分钟)
+$K create job bootstrap-ingest --from=cronjob/readlist-ingest
+$K wait --for=condition=complete job/bootstrap-ingest --timeout=1800s
+$K logs job/bootstrap-ingest
+
+# 4) 再打一次分,公开榜才会有内容
+$K create job bootstrap-score2 --from=cronjob/readlist-score
+
+# 5) ⚠️ 收尾:删掉引导 Job。已完成的 Job pod 仍算 PVC 使用者,
+#    留着会让日后删 PVC 卡在 Terminating
+$K delete job bootstrap-snapshot bootstrap-score bootstrap-ingest bootstrap-score2
+```
+
+**建议在第 2 步之后、建 HTTPRoute 之前先看一眼 `publisher-picks`(内部榜)**——
+它零外部依赖,能直接反映出版社归一、work 聚类、孤儿数是否正常。
+确认没问题再放 ingest,最后才把域名接上。
+
+### 4.2 首轮 ingest 分几晚
+
+`INGEST_BUDGET=800` 是**每次运行**的上限。全库约需 1,000–1,500 次请求,
+所以首轮要 2 晚跑完(第二晚会自动跳过已缓存的,只补没查过的)。
+中途看进度:`$K logs job/<name>` 里的 `缓存命中` 与 `本次预算已用完`。
 
 ## 5. 上线前必须守住的红线
 
