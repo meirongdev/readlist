@@ -5,3 +5,6 @@ docs/
 *.db-wal
 *.db-shm
 deploy/kind/.kind-state/
+deploy/
+scripts/
+.github/

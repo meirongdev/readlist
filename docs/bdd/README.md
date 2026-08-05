@@ -22,8 +22,10 @@
 
 ## 约定
 
-- 步骤语言用中文；`# language: zh-CN` + 英文关键字（Given/When/Then/And/But）可与主流
-  Gherkin runner（Cucumber / godog / behave）兼容。
+- 步骤语言用中文，文件头声明 `# language: zh-CN`，关键字用该 dialect 的中文形式
+  （假设/假如/当/那么/而且）。**Gherkin 的 dialect 是互斥的** —— 声明了 `zh-CN`
+  就不能混用 Given/When/Then，主流 runner（Cucumber / godog / behave）都按声明的
+  dialect 解析。
 - 场景中的"系统"指 readlist 应用；"快照"指每夜 CronJob 的产物（`metadata.db` + `reading.db`）。
 - **外部依赖不可控**：Google Books / OpenLibrary / HN / LLM 网关都视为外部黑盒，场景只描述
   系统对这些依赖的**确定行为**（缓存、降级、配额停发），不描述外部本身。

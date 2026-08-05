@@ -63,7 +63,7 @@
 ```
 Phase 0（补录）   ──┐  纯手工，随时开始，与代码并行
                     ├──► Phase 2 的第 3 步（to-read-next 榜）
-Phase 1（修 pubdate）──► Phase 2 的 F 维度 ──► new-2026 榜
+Phase 1（修 pubdate）──► Phase 2 的 F 维度 ──► fresh-releases 榜
 Phase 2 ──► Phase 3 ──► Phase 4
 ```
 

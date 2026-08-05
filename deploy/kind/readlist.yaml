@@ -12,6 +12,10 @@ data:
   DB_PATH: /data/readlist.db
   API_LISTEN_ADDR: ":8080"
   EXPOSE_READ_STATUS: "true"
+  STANDARD_VERSION: "1.0"
+  # 保留的历史 run 数(回滚窗口)。每夜一个 run 的产物约 1.5 万行,不回收会在
+  # 几个月内把 100Mi 的 PVC 写满。
+  KEEP_RUNS: "5"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -43,7 +47,9 @@ spec:
       securityContext:
         fsGroup: 65532
       initContainers:
-        # 先建库再打分;distroless 无 shell,直接调用 readlist init。
+        # 建库 + 保证有一份可服务的榜单;distroless 无 shell,直接调用 readlist init。
+        # `init` 是幂等的:已发布过 run 就跳过打分。无条件重打分会让每次 Pod 重启
+        # 都换一个 run_id,matrix 的 immutable 缓存随之全部失效。
         - name: init-data
           image: readlist:dev
           imagePullPolicy: IfNotPresent

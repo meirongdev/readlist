@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # make check 里的 test-spa 需要 node:它在真服务上加载真正的 app.js,
+      # 逐本比对客户端与后端算出的 TBS/coverage。缺 node 会静默跳过,
+      # 而这条校验正是权重滑块唯一的回归防线,不能让它在 CI 里被跳过。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 确认 node 就位(否则 test-spa 会静默跳过)
+        run: node --version
+
+      - name: fmt + vet + go test + spa 一致性
+        run: make check
+
+      - name: 竞态检测
+        run: make test-race
+
+  build-image:
+    # 只验证镜像能构出来(含交叉编译),不推送 —— 推送归 image.yml。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建 linux/arm64(集群是 ARM free tier,NFR-5)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

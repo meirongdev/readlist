@@ -4,8 +4,10 @@
 > 把私有 Calibre 书库（2,054 本）按 **7 个独立维度**打分，榜单 = 维度分上的**权重档案**，
 > 并标注每本书的**阅读状态**。公开站只发元数据与评分，**不发书**。
 
-**状态**：✅ MVP 已实现并通过本地 kind 端到端验证（2026-08-05）。
-**日期**：2026-08-04
+**状态**：✅ 全管道已实现（`snapshot` → `ingest` → `score` → `serve`），kind 端到端通过，镜像 CI 就位。
+🟡 上线剩余工作在 **homelab 仓库**（清单登记 + 备份归属）与 Cloudflare（限流）——
+见 [docs/homelab-deploy.md](docs/homelab-deploy.md)。
+**日期**：2026-08-05
 
 ---
 
@@ -36,6 +38,7 @@
 | [docs/reading-status.md](docs/reading-status.md) | **阅读状态**：真相源、状态模型、补录、最小导出 |
 | [docs/architecture.md](docs/architecture.md) | 架构、数据模型、部署形状 |
 | [docs/mvp.md](docs/mvp.md) | **MVP 实现**：命令、API、kind 端到端验证 |
+| [docs/review-2026-08-05.md](docs/review-2026-08-05.md) | **实现评审**：4 个阻塞级缺陷（可复现性 / 准入闸门 / 公开面 / 滑块）与修法 |
 | [docs/homelab-deploy.md](docs/homelab-deploy.md) | **上线剩余工作归档**：homelab 清单 / 镜像 CI / 数据管道 / 备份 / 限流 |
 | [docs/roadmap.md](docs/roadmap.md) | 分期落地、风险、开放问题 |
 
@@ -50,6 +53,14 @@
    不是书库的 `metadata.db`），但管道好写、**补录才是工作量**，而那只有库主人自己能做。
 
 细节见 [docs/data-baseline.md](docs/data-baseline.md)。
+
+第 1 条现在由代码强制：`snapshot` 产出的 `pubdate` 来源（`calibre` / `mtime-fallback` /
+`unknown`）**没有一种在可信名单里**，时效维度一律记 `unknown`；只有 `ingest` 从
+Google Books / OpenLibrary 拿到的日期才算数。这也意味着修 `pubdate` **不需要**先去改
+calibre 的库 —— 外部响应里本来就带 `publishedDate`。
+
+第 3 条实测新增（2026-08-05）：⚠️ **Google Books 的匿名配额是按共享项目计的**，
+一次探测请求就直接拿到 429。上线前必须配 `GOOGLE_BOOKS_KEY`，否则 A 维与 F 维基本拿不到数据。
 
 ## 与 homelab 仓库的关系
 

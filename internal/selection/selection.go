@@ -23,18 +23,18 @@ type Facts struct {
 	Grade            string
 	Coverage         float64
 	AvailableDims    int
+	TotalDims        int      // 该 preset 加权的维度总数
 	Missing          []string // "时效—出版日期不可信" 这类确定性描述
 }
 
 // Candidate 一个待选 work。
 type Candidate struct {
-	WorkID        string
-	Topic         string
-	FirstAuthor   string
-	TBS           float64
-	Coverage      float64
-	AvailableDims int
-	Facts         Facts
+	WorkID      string
+	Topic       string
+	FirstAuthor string
+	TBS         float64
+	Coverage    float64
+	Facts       Facts
 }
 
 // Config 选材约束(system-design §5 默认:size 20 / max_per_topic 2 / max_per_author 1)。
@@ -68,10 +68,16 @@ func Select(cands []Candidate, cfg Config) []Entry {
 	sorted := make([]Candidate, len(cands))
 	copy(sorted, cands)
 	sort.SliceStable(sorted, func(i, j int) bool {
-		if cfg.Asc {
-			return sorted[i].TBS < sorted[j].TBS
+		if sorted[i].TBS != sorted[j].TBS {
+			if cfg.Asc {
+				return sorted[i].TBS < sorted[j].TBS
+			}
+			return sorted[i].TBS > sorted[j].TBS
 		}
-		return sorted[i].TBS > sorted[j].TBS
+		// 并列必须有确定的打破键。没有它,同分书的先后取决于调用方传进来的顺序;
+		// 而多样性约束(每主题/每作者上限)会把这个顺序放大成**成员差异** ——
+		// 同一份语料两次打分会出两份不同的榜(NFR-10 破功)。
+		return sorted[i].WorkID < sorted[j].WorkID
 	})
 
 	out := make([]Entry, 0, cfg.Size)
@@ -101,7 +107,7 @@ func Select(cands []Candidate, cfg Config) []Entry {
 	return out
 }
 
-// Reason 确定性理由串。顺序固定:出版社 → HN 提及 → 半衰期 → 深度 → 覆盖 → 缺失。
+// Reason 确定性理由串。顺序固定:出版社 → 作者 → HN 提及 → 半衰期 → 深度 → 覆盖 → 缺失。
 func Reason(f Facts) string {
 	parts := []string{}
 	if f.Publisher != "" && f.Publisher != "unknown" {
@@ -123,23 +129,15 @@ func Reason(f Facts) string {
 	if f.HasDepth {
 		parts = append(parts, fmt.Sprintf("深度 %.0f/100", f.Depth))
 	}
-	avail := f.AvailableDims
-	if avail <= 0 {
-		avail = coverageDims(f.Coverage)
+	// 分母是**这份榜实际用到的维度数**,不是 7。timeless 只用 5 维,一本五维全实测的书
+	// 写成「按 5/7 维评出」会被读成缺了两维。
+	if f.TotalDims > 0 {
+		parts = append(parts, fmt.Sprintf("按 %d/%d 维评出", f.AvailableDims, f.TotalDims))
 	}
-	parts = append(parts, fmt.Sprintf("按 %d/7 维评出", avail))
 	if len(f.Missing) > 0 {
 		parts = append(parts, "缺："+strings.Join(f.Missing, "、"))
 	}
 	return strings.Join(parts, " · ")
-}
-
-func coverageDims(cov float64) int {
-	dims := 7
-	for cov < float64(dims-1)/7+0.0001 {
-		dims--
-	}
-	return dims
 }
 
 // YearRange 返回提及年份区间(供 Facts)。

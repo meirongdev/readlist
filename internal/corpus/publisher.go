@@ -1,6 +1,9 @@
 package corpus
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // PublisherInfo 归一化后的出版社及其层级。
 type PublisherInfo struct {
@@ -22,119 +25,63 @@ func TierScore(tier int) float64 {
 	}
 }
 
-// normalize 把出版社名压成可匹配的规范形:小写、去标点/分隔符、去后缀词。
+// publisherTiers 出版社层级表(scoring-standard §3 T 维)。key 是规范形的子串,
+// 首个命中生效 —— 所以 "O'Reilly"/"O'Reilly Media, Inc."/"oreilly media" 会
+// 归并到同一档(Packt 4 变体 → 1、O'Reilly 2 → 1、BPB 2 → 1)。
+var publisherTiers = []struct {
+	key       string
+	canonical string
+	tier      int
+}{
+	{"oreilly", "O'Reilly Media", 1},
+	{"manning", "Manning", 1},
+	{"pragmatic", "Pragmatic Bookshelf", 1},
+	{"nostarch", "No Starch Press", 1},
+	{"mitpress", "MIT Press", 1},
+	{"addisonwesley", "Addison-Wesley", 1},
+	{"apress", "Apress", 2},
+	{"crc", "CRC / Taylor & Francis", 2},
+	{"taylorfrancis", "CRC / Taylor & Francis", 2},
+	{"wiley", "Wiley", 2},
+	{"springer", "Springer", 2},
+	{"simonandschuster", "Simon & Schuster", 2},
+	{"packt", "Packt", 3},
+	{"bpb", "BPB", 3},
+	{"pearson", "Pearson", 3},
+	{"sams", "SAMS", 3},
+	{"elsevier", "Elsevier", 3},
+	{"osborne", "Osborne", 3},
+	{"sybex", "Sybex", 3},
+}
+
+// normalize 把出版社名压成可匹配的规范形:小写、去标点/分隔符。
+//
+// 保留全部 Unicode 字母数字:只保留 [a-z0-9] 会让「电子工业出版社」的规范形变成
+// 空串,于是所有中文出版社都掉进 tier 4(最低档),T 维被系统性低估。
 func normalize(raw string) string {
-	s := strings.ToLower(raw)
 	var b strings.Builder
-	for _, r := range s {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+	for _, r := range strings.ToLower(raw) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
 			b.WriteRune(r)
-		} else if r == '&' {
+		case r == '&':
 			b.WriteString("and")
 		}
 	}
 	return b.String()
 }
 
-// match 检查 raw 的规范形是否包含 key(以及 key 的常见变体)。
-func match(raw, key string) bool {
-	n := normalize(raw)
-	if n == key {
-		return true
-	}
-	// 处理连写/空格差异:直接子串匹配(规范形已去分隔符)。
-	return strings.Contains(n, key)
-}
-
 // Publisher 把原始出版社名归一为规范名 + tier。
-// 变体合并(scoring-standard §3 T 维):Packt 4 变体→1、O'Reilly 2→1、BPB 2→1。
 func Publisher(raw string) PublisherInfo {
-	r := strings.TrimSpace(raw)
-	if r == "" {
+	n := normalize(raw)
+	if n == "" {
 		return PublisherInfo{Norm: "unknown", Tier: 4}
 	}
-	tier1 := []string{"oreilly", "manning", "pragmatic", "nostarch", "nostarchpress", "mitpress", "addisonwesley", "addisonwesleyprofessional"}
-	tier2 := []string{"apress", "crc", "taylorfrancis", "wiley", "springer", "simonschuster"}
-	tier3 := []string{"packt", "bpb", "oreillymedia", "pearson", "sams", "elsevier", "osborne", "sypress"}
-
-	var pi PublisherInfo
-	norm := r
-	normOK := false
-	tier := 4
-	for _, k := range tier1 {
-		if match(r, k) {
-			norm, tier, normOK = canonicalName(k), 1, true
-			break
+	for _, p := range publisherTiers {
+		if strings.Contains(n, p.key) {
+			return PublisherInfo{Norm: p.canonical, Tier: p.tier}
 		}
 	}
-	if !normOK {
-		for _, k := range tier2 {
-			if match(r, k) {
-				norm, tier, normOK = canonicalName(k), 2, true
-				break
-			}
-		}
-	}
-	if !normOK {
-		for _, k := range tier3 {
-			if match(r, k) {
-				norm, tier, normOK = canonicalName(k), 3, true
-				break
-			}
-		}
-	}
-	if !normOK {
-		// 未知但有名字的技术出版社 → tier 3;完全空 → tier 4。
-		if len(normalize(r)) > 0 {
-			norm, tier = strings.TrimSpace(raw), 3
-		} else {
-			norm, tier = "unknown", 4
-		}
-	}
-	pi.Norm = norm
-	pi.Tier = tier
-	return pi
-}
-
-func canonicalName(key string) string {
-	switch key {
-	case "oreilly", "oreillymedia":
-		return "O'Reilly Media"
-	case "manning":
-		return "Manning"
-	case "pragmatic":
-		return "Pragmatic Bookshelf"
-	case "nostarch", "nostarchpress":
-		return "No Starch Press"
-	case "mitpress":
-		return "MIT Press"
-	case "addisonwesley", "addisonwesleyprofessional":
-		return "Addison-Wesley"
-	case "apress":
-		return "Apress"
-	case "crc", "taylorfrancis":
-		return "CRC / Taylor & Francis"
-	case "wiley":
-		return "Wiley"
-	case "springer":
-		return "Springer"
-	case "simonschuster":
-		return "Simon & Schuster"
-	case "packt":
-		return "Packt"
-	case "bpb":
-		return "BPB"
-	case "pearson":
-		return "Pearson"
-	case "sams":
-		return "SAMS"
-	case "elsevier":
-		return "Elsevier"
-	case "osborne":
-		return "Osborne"
-	case "sypress":
-		return "Sybex"
-	default:
-		return key
-	}
+	// 未在表内但确实有名字的出版社 → tier 3(表外不等于无出版社)。
+	return PublisherInfo{Norm: strings.TrimSpace(raw), Tier: 3}
 }

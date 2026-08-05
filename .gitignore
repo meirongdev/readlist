@@ -22,3 +22,7 @@ coverage.out
 
 # kind / docker 本地产物
 deploy/kind/.kind-state/
+
+# SPA 一致性校验的临时目录
+.tmp-spa/
+.tmp-pipeline/

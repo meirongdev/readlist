@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 
 	_ "modernc.org/sqlite"
@@ -24,6 +26,13 @@ func (d *DB) Close() error { return d.db.Close() }
 
 // Open 打开 SQLite(WAL 模式)并应用所有迁移。
 func Open(path string) (*DB, error) {
+	// 先建目录:SQLite 不会替你创建父目录,只会给一句 "unable to open database file (14)"
+	// —— 那句话看不出是路径问题。空 PVC 上首次运行必然踩到。
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("创建数据目录 %s: %w", dir, err)
+		}
+	}
 	dsn := fmt.Sprintf(
 		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)",
 		path,

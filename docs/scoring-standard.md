@@ -1,10 +1,16 @@
 # 评分标准 TBS v1.0（Tech Book Score）
 
-> 日期: 2026-08-04
-> 状态: 📐 规格草案 v1.0（未实现）
+> 日期: 2026-08-04（§1 / §4.3 / §5 / §6 于 2026-08-05 随实现修订）
+> 状态: ✅ v1.0 已实现，见 [mvp.md](mvp.md)
 > 数据可得性依据: [data-baseline.md](data-baseline.md)
+> 证据模型: 逐维三态 + preset `needs`，见 [system-design.md §2](system-design.md)
 
 这是**规格文档**，不是设计讨论。实现应当逐条对照本文；本文改动 = 标准升版。
+
+> **本文取代过的三处写法**（都曾在实现里造成静默失效，修订记录见
+> [review-2026-08-05.md](review-2026-08-05.md)）：
+> 单一 A/B/C/D 证据闸门 → 逐维三态 + `needs`（§5）；preset 级 `exempt` → 逐本
+> renormalize 与 `coverage`（§4.3）；`filters.min_evidence` → `needs`（§6）。
 
 ---
 
@@ -13,8 +19,10 @@
 1. **维度独立测量，榜单靠权重组合。**
    一本书的维度分是"事实"，权重是"价值判断"。加一个新榜 = 加一个权重向量，**不重算数据**。
 2. **缺数据 ≠ 0 分。**
-   缺数据用贝叶斯收缩到语料先验，并单独记录**证据等级**；证据不足的书不上公开榜
-   （借 Metacritic 的 "not enough reviews"），而不是给它一个编出来的分。
+   缺数据用贝叶斯收缩到语料先验（`shrunk`）；连收缩都不合理的记 `unknown`，该维
+   **不参与任何计算**，而不是给它一个编出来的分。
+   借 Metacritic 的 "not enough reviews"，但判定是**逐维度**的：一本书某一维证据不足，
+   只影响需要那一维的榜单，不影响它在其他榜单里的资格（§5）。
 3. **可解释。**
    每个榜单条目可展开：各维度分 + 每一分的数据来源 + 算它时用的标准版本。
    自建榜单唯一的信任来源就是"能看见怎么算出来的"。
@@ -197,84 +205,82 @@ band_score(x; target, tol) = 100 · max(0, 1 - |x - target| / tol)
 TBS = Σ_i w_i · score_i  +  Σ_j w_j · band_score(score_j; target_j, tol_j)
 ```
 
-- 权重和为 1；
-- 被 preset 声明 `exempt` 的维度**从分母里剔除并重新归一**（"经典长青"榜豁免时效，
-  不是给时效权重 0 —— 那会让老书被隐式惩罚）。
+权重和为 1。**renormalize 是逐本的，不是逐 preset 的**：某本书某一维不可用时，把这一维
+的权重摊回其余维度，而不是让它吃一个编出来的先验值：
+
+```
+可用维度 = { i : state_i ≠ unknown 且 preset 的 needs_i 被满足 }
+coverage = Σ_{i ∈ 可用} w_i          # 权重和为 1，所以这就是覆盖率
+TBS      = (Σ_{i ∈ 可用} w_i · eff_i) / coverage
+eff_i    = band_score(score_i) 若 i 在 bands，否则 score_i
+```
+
+- `coverage` 直接进 UI：**「按 5/5 维评出」比「78.3 分」诚实得多**；
+- `coverage < min_coverage` → 不进这份书单（但仍进全库目录，标注缺哪几维）；
+- **不需要 preset 级的 `exempt`**：不参与的维度不写权重即为豁免。原先的写法是恒等变换 ——
+  剔除一个权重为 0 的维度、再把已经和为 1 的权重「重新归一」，两步都什么也没做。
 
 ---
 
-## 5. 证据等级（决定能否上公开榜）
+## 5. 证据状态与证据徽章
 
-| 等级 | 条件 | 待遇 |
-|------|------|------|
-| **A** | 有外部评分且 `v ≥ m`；`pubdate_source` 可信；LLM 标注 `confidence ≥ 0.7` | 全部榜单 |
-| **B** | 有外部评分但 `v < m`，**或** HN 提及 ≥1；`pubdate_source` 可信 | 全部榜单（前端标"证据有限"） |
-| **C** | 只有本地元数据 + LLM 标注，无任何外部信号 | **不上榜**，只进"全库目录"页并标注"数据不足" |
-| **D** | `pubdate` 来自 mtime 兜底 ／ 作者 `Unknown` ／ 元数据残缺 | **不公开** |
+### 5.1 逐维三态 —— 准入的唯一依据
 
-按实测推算，能进 A/B 的约 **700–900 本**（715 ISBN + 310 google id 去重后，
-加上一批靠 HN 提及进 B 的）。
+证据是**逐维度**产生的，所以状态也落在每个 `(work, dim)` 上，而不是每本书一个字母：
 
-**这是特性不是缺陷**：一个 800 本的可信榜，比 2,054 本掺着 1,300 本猜测分的榜有用得多。
+| state | 含义 | 能否参与排序 |
+|-------|------|-------------|
+| `measured` | 有实测证据（外部评分 / HN 命中 / 可信 `pubdate` / 高置信标注） | 是，有判别力 |
+| `shrunk` | 无证据，贝叶斯收缩到语料先验 | 是，但判别力为 0 |
+| `unknown` | 连收缩都不合理（`pubdate` 被 mtime 污染的 F、作者与出版社均未知的 T） | **否** |
+
+preset 用 `needs` 声明自己要什么。**准入 = `needs` 全部满足 且 `coverage ≥ min_coverage`**，
+没有第三个条件。`needs` 可以声明未加权的维度 —— 「近一年新书」只要求 `F: measured`
+（出版日期必须可信），但不给 F 权重（新书之间比时效没有意义）。
+
+### 5.2 证据徽章 —— 只用于展示
+
+| 徽章 | 条件 |
+|------|------|
+| **A** | 七维全部 `measured` |
+| **B** | 有 `shrunk`，但 A 或 C 维有实测的外部信号 |
+| **C** | 主要靠本地元数据，无任何外部信号 |
+| **D** | 关键维（F 或 T）为 `unknown` |
+
+> ⚠️ **这个字母不决定任何准入。**
+> 它曾被当成全局闸门，后果是：一本 A/C/T 三维齐备的 O'Reilly 经典，仅因出版日期来自
+> mtime 兜底，就被排除在**明确声明不使用时效维度**的「经典长青」榜之外 —— 实测影响
+> 全库 23%（477 本）。根因是把逐维度的证据压成一个标量，去卡所有榜单。
+> 现在覆盖不足的书**仍进全库目录、并逐本标注缺哪几维**，只是进不了真正需要那几维的榜单。
+
+按实测推算 A/B 合计约 **700–900 本**。这是特性不是缺陷：一个 800 本的可信榜，比 2,054 本
+掺着 1,300 本猜测分的榜有用得多。但「可信」是**逐榜、逐维**判定的，不是一道全站闸门。
 
 ---
 
 ## 6. 榜单预设（权重档案）
 
-配置即数据，一个 preset 一段 YAML，放 `presets/*.yaml`。加榜不改代码、不重算分数。
+配置即数据。**唯一真相源是 [`internal/preset/presets.yaml`](../internal/preset/presets.yaml)**
+（内嵌进二进制）。本文只定义字段语义 —— 此前这里抄了一份完整预设清单，两边随即漂移。
 
-```yaml
-- id: timeless
-  name: 经典长青
-  weights: { A: 0.35, C: 0.30, T: 0.20, L: 0.15 }
-  exempt: [F]                      # 明确豁免时效 —— 老不是缺点
-  filters: { min_evidence: A, min_age_years: 3 }
+| 字段 | 语义 |
+|------|------|
+| `weights` | 各维权重，**之和必须为 1**。不参与的维度**直接不写** —— 这就是「豁免」的表达方式，不需要单独的 `exempt` |
+| `bands` | 目标带；键**必须同时出现在 `weights` 里**，否则 band 项的系数是 0（空操作） |
+| `needs` | 逐维最低证据状态，**硬门**；可以声明未加权的维度 |
+| `select` | `size` / `max_per_topic` / `max_per_author` / `min_coverage`（选材约束，见 [system-design.md §5](system-design.md)） |
+| `filters` | `min_age_years`（按**最早**版次算年龄）/ `pubdate_within_months`（滚动窗口）/ `pubdate_source` / `topics_any` / `level` / `read_status` / `not_in_shelf` / `min_personal_rating`（单位：**星 0–5**，即 calibre metadata 值 ÷ 2） |
+| `order` | `desc`（默认）或 `asc`（`library-hygiene` 要的是最差的那些） |
+| `visibility` | `public`（默认）或 `internal`（不出现在公开导航，也不能按 id 直接拉到） |
 
-- id: ship-this-week
-  name: 最快上手
-  weights: { F: 0.30, P: 0.35, A: 0.20, L: 0.15 }
-  bands:   { D: { target: 35, tol: 25 } }        # 太深的书不适合速成
-  filters: { min_evidence: B, level: [beginner, intermediate] }
+以上每一条都在**加载时强制校验**（`internal/preset.Validate`），写错则进程启动即失败。
+理由是这类错误不会报错、只会静默失效：`ship-this-week` 曾声明 `bands: { D: … }` 却没给
+D 权重，于是「太深的书不适合速成」这个卖点在公式上根本不成立，而榜单看起来一切正常。
 
-- id: deep-dive
-  name: 深挖原理
-  weights: { D: 0.35, T: 0.25, A: 0.25, C: 0.15 }
-  filters: { min_evidence: B, level: [advanced, reference] }
-
-- id: new-2026
-  name: 今年新书
-  weights: { A: 0.30, C: 0.25, P: 0.25, T: 0.20 }
-  filters:
-    pubdate_year: 2026
-    pubdate_source: [google, openlibrary, file-meta]   # ⚠️ 排除 mtime 兜底
-  # 新书评分人数少 → A 的贝叶斯先验自动把它们拉回均值，不会被"3 个 5 星"刷榜
-
-- id: ai-llm
-  name: AI / LLM 专题
-  weights: { F: 0.35, P: 0.25, A: 0.25, C: 0.15 }      # 该领域半衰期最短，时效权重最高
-  filters: { topics_any: [ai, llm, ml, nlp], min_evidence: B }
-
-- id: to-read-next
-  name: 下一本读什么
-  weights: { A: 0.30, C: 0.25, T: 0.20, P: 0.15, L: 0.10 }
-  filters: { min_evidence: B, read_status: [unread], not_in_shelf: [弃读] }
-  # 多维评分对库主人最大的价值：把客观排行变成阅读队列
-
-- id: read-and-loved
-  name: 我读过且推荐
-  weights: { A: 0.40, T: 0.30, D: 0.30 }
-  filters: { read_status: [read], min_personal_rating: 4 }
-  # ⚠️ 实测已读 ∩ 有库内评分只有 3 本 —— 需先补个人星级，否则这个榜开不起来
-
-- id: library-hygiene
-  name: 待补元数据
-  weights: { L: 1.0 }
-  order: asc
-  visibility: internal            # 不公开，书库卫生榜
-```
-
-**前端权重滑块**：分数已按维度算好存表，重排是 2,054 行的向量点积，浏览器内毫秒级完成。
-现有技术书榜全是固定权重的死榜，**"自己调口径"是这个站最容易做出的差异点**。
+**前端权重滑块**：分数已按维度算好存表，重排是向量点积，浏览器内毫秒级完成。
+`/api/v1/lists` 必须随榜返回 `weights` / `bands` / `order` / `min_coverage` —— 少了它们
+前端只能拿到空权重表，把每本书都算成 0 分。客户端公式与 `score.Combine` 之间没有编译器
+把关，所以由 `make test-spa` 逐本比对两者的 TBS 与 coverage。
 
 ---
 
@@ -302,4 +308,5 @@ TBS = Σ_i w_i · score_i  +  Σ_j w_j · band_score(score_j; target_j, tol_j)
 | 改出版社层级表、改半衰期表、改权重预设 → `minor` 升版 |
 | 升版**必须附「20 本已知书的排名对比」**，防止悄悄调权重把自己喜欢的书调上去 |
 | 历史分不删；前端可切换版本查看同一本书的分数演变 |
-| 同一 `standard_version` + 同一份 evidence 快照 ⇒ 分数**逐位可复现**（[requirements.md](requirements.md) NFR-10） |
+| 同一 `standard_version` + 同一 `corpus_id` + 同一 `facts_hash` ⇒ 分数**逐位可复现**（[requirements.md](requirements.md) NFR-10）。三元组都要:分位归一是**语料相对**的,往库里加 30 本书会让全部书的分数变化 |
+| 每个 run 落 `corpus_id`(works+editions 的内容 hash)与 `facts_hash`(evidence/labels/mentions/overrides/reading 的内容 hash),前端与评审才能区分「分数变了是因为公式变了」还是「因为语料变了」 |

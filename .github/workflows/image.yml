@@ -1,0 +1,77 @@
+name: image
+
+# 推版本化 tag 才发布镜像。
+#
+# 两条集群约束(architecture §6):
+#   - 镜像**必须含 linux/arm64**(oracle-k3s 是 ARM free tier);
+#   - Kyverno **禁止 `latest`**,所以这里刻意关掉 metadata-action 的 latest flavor。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '手动发布用的版本号(如 v0.1.0)'
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 先跑测试再推镜像:推出去的东西不该没过门禁。
+      - name: 门禁(go test)
+        run: make test-go
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # latest=false:集群的 Kyverno 策略会拒掉 latest tag 的工作负载。
+          flavor: latest=false
+          tags: |
+            type=ref,event=tag
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,format=long,prefix=sha-
+
+      - name: 构建并推送(amd64 + arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 输出可直接写进清单的不可变引用
+        run: |
+          echo "### 镜像已发布" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest: ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "把上面的 tag 或 digest 填进 homelab 仓库的 readlist.yaml。" >> "$GITHUB_STEP_SUMMARY"

@@ -1,7 +1,13 @@
 # 架构与数据模型
 
 > 日期: 2026-08-04
-> 状态: 📐 设计
+> 状态: 📐 设计。**§3–§5（数据流 / 数据模型 / 缓存）已被
+> [system-design.md](system-design.md) 取代** —— 那边是三层管道（facts → judgement →
+> selection）与逐维证据模型，也是实现照着做的那份；本文的 §3–§5 只作历史记录。
+> 特别注意 §4 里的 `scores` 表**不存在**：综合分是 `f(dim_scores, preset)` 的纯函数，
+> 落库的是选材产物 `lists`。落地 schema 见
+> [`internal/store/migrations/0001_schema.sql`](../internal/store/migrations/0001_schema.sql)。
+> §1（单二进制）、§2（快照隔离）、§6（部署）、§7（可观测）仍然有效。
 > 环境事实依据: [data-baseline.md §4](data-baseline.md#4-环境事实)
 
 ---

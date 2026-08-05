@@ -1,21 +1,30 @@
 # readlist 榜单预设 —— 权重档案(system-design §5 选材层)
 # 加榜 = 加一段 YAML,不改代码、不重算分数。
+#
+# 加载时强制校验(internal/preset.Validate),写错就起不来:
+#   weights  各维权重,**之和必须为 1**;不参与的维度直接不写(这就是"豁免"的表达方式,
+#            不需要单独的 exempt —— 逐本 renormalize 由 coverage 承担)。
+#   bands    目标带,**键必须同时出现在 weights 里**,否则 band 项系数为 0 = 空操作。
+#   needs    逐维最低证据状态,是**硬门**:不满足则该书不进这份榜。可以声明未加权的维度
+#            (如 fresh-releases 只要求 F 可信,但不给 F 权重)。
+#   select   size / max_per_topic / max_per_author / min_coverage(选材约束)。
 
 - id: timeless
   name: 经典长青
   description: 经历过时间检验、值得反复读的经典技术书
   weights: { A: 0.30, C: 0.25, T: 0.25, D: 0.10, readability: 0.10 }
-  bands: { D: { target: 75, tol: 35 } }
-  needs: { A: measured, C: measured, T: measured }
+  bands: { D: { target: 75, tol: 35 } } # 经典书深度中高,但不是越深越好
+  needs: { A: measured, C: measured, T: measured } # F 压根不出现 → 无需豁免
   select: { size: 20, max_per_topic: 2, max_per_author: 1, min_coverage: 0.7 }
-  filters: { min_age_years: 3 }
+  filters: { min_age_years: 3 } # 按**最早**版次算年龄:老书出新版不该被判成新书
   order: desc
   visibility: public
 
 - id: ship-this-week
   name: 最快上手
   description: 这周就能读完并开始动手的书
-  weights: { F: 0.30, P: 0.35, A: 0.20, readability: 0.15 }
+  # D 必须占一份权重,band 才有系数 —— 「太深的书不适合速成」正是这个榜的卖点。
+  weights: { F: 0.25, P: 0.30, A: 0.15, D: 0.20, readability: 0.10 }
   bands: { D: { target: 35, tol: 25 } }
   needs: { F: measured, P: measured }
   select: { size: 20, max_per_topic: 3, max_per_author: 1, min_coverage: 0.7 }
@@ -26,6 +35,8 @@
 - id: deep-dive
   name: 深挖原理
   description: 概念密度高、需要慢慢啃的原理书
+  # 这个榜里深度是单调维度(越深越好),所以不设 band —— 与 timeless 的目标带
+  # 是两种不同的价值判断,不是规格不一致。
   weights: { D: 0.35, T: 0.25, A: 0.25, C: 0.15 }
   needs: { D: measured }
   select: { size: 20, max_per_topic: 2, max_per_author: 1, min_coverage: 0.7 }
@@ -33,20 +44,23 @@
   order: desc
   visibility: public
 
-- id: new-2026
-  name: 今年新书
-  description: 2026 年出版、出版日期可信的新书
+- id: fresh-releases
+  name: 近一年新书
+  description: 近 12 个月出版、且出版日期可信的新书
   weights: { A: 0.30, C: 0.25, P: 0.25, T: 0.20 }
-  needs: { F: measured }
+  needs: { F: measured } # 只要求出版日期可信,不给时效权重(新书之间比时效没意义)
   select: { size: 20, max_per_topic: 3, max_per_author: 1, min_coverage: 0.6 }
-  filters: { pubdate_year: 2026, pubdate_source: [google, openlibrary, file-meta] }
+  # 滚动 12 个月窗口,不是硬编码 2026 —— 硬编码会让这个榜在跨年后静默失效。
+  filters:
+    pubdate_within_months: 12
+    pubdate_source: [google, openlibrary, file-meta]
   order: desc
   visibility: public
 
 - id: ai-llm
   name: AI / LLM 专题
   description: 大模型与机器学习方向的技术书
-  weights: { F: 0.35, P: 0.25, A: 0.25, C: 0.15 }
+  weights: { F: 0.35, P: 0.25, A: 0.25, C: 0.15 } # 该领域半衰期最短 → 时效权重最高
   needs: { F: measured }
   select: { size: 20, max_per_topic: 3, max_per_author: 1, min_coverage: 0.6 }
   filters: { topics_any: [ai, llm, ml, nlp, deep-learning, machine-learning] }
@@ -56,6 +70,9 @@
 - id: to-read-next
   name: 下一本读什么
   description: 高分 ∩ 未读 —— 把客观排行变成阅读队列
+  # 开放项(review M11):个人选「下一本读什么」最敏感的其实是 F(会不会过时)和
+  # D(深度合不合当前水平),这份权重里都没有;而「想读书架 / 下载过」这些意图信号
+  # 已经导出但没有任何维度消费。要改的是产品口径,不是机制,所以留给库主人定。
   weights: { A: 0.30, C: 0.25, T: 0.20, P: 0.15, readability: 0.10 }
   needs: { A: measured, T: measured }
   select: { size: 20, max_per_topic: 2, max_per_author: 1, min_coverage: 0.7 }
@@ -69,9 +86,24 @@
   weights: { A: 0.40, T: 0.30, D: 0.30 }
   needs: { A: measured, T: measured, D: measured }
   select: { size: 20, max_per_topic: 3, max_per_author: 1, min_coverage: 0.7 }
-  filters: { read_status: [read], min_personal_rating: 4 }
+  filters: { read_status: [read], min_personal_rating: 4 } # 单位:星(0–5)
   order: desc
   visibility: public
+
+- id: publisher-picks
+  name: 出版社优选(内部)
+  description: 零外部依赖的第一份书单 —— 只用出版社层级与馆藏可读性
+  # system-design §12 第 2 步。上面 7 个公开榜的 needs 都要求外部证据(A/C/F/D),
+  # 所以在 ingest 跑通之前它们全都是空的。这份榜只用**纯本地可算**的两维,
+  # 目的是让选材约束、理由串、diff 工具、gold 门禁能在零外部不确定性的条件下调通。
+  #
+  # 刻意标 internal:「出版社好 + 格式好」不足以支撑一份对外的推荐书单,
+  # 把它放到公开导航里就是拿出版社偏见冒充书评。
+  weights: { T: 0.70, readability: 0.30 }
+  needs: { T: measured }
+  select: { size: 30, max_per_topic: 4, max_per_author: 1, min_coverage: 1.0 }
+  order: desc
+  visibility: internal
 
 - id: library-hygiene
   name: 待补元数据

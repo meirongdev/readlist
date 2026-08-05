@@ -134,7 +134,7 @@ func Seed(d *store.DB) (int, error) {
 		workID := WorkKey(b.title, b.author)
 		if !seenWorks[workID] {
 			seenWorks[workID] = true
-			hl := HalfLifeByTopic(b.topicClass)
+			hl := HalfLifeFor(b.title, b.topicClass, nil)
 			if _, err := tx.Exec(`INSERT OR IGNORE INTO works
 				(work_id, canonical_title, first_author, primary_topic, level, half_life_years, half_life_source)
 				VALUES (?,?,?,?,?,?,?)`,
@@ -154,8 +154,8 @@ func Seed(d *store.DB) (int, error) {
 			(book_id, work_id, title, isbn13, google_volume_id, publisher_raw, publisher_norm, format,
 			 language, has_comments, has_cover, pubdate, pubdate_source, personal_rating_stars)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			written+1, workID, b.title, orEmpty(b.isbn13), orEmpty(b.googleID), b.publisher, pi.Norm, b.format,
-			b.lang, boolInt(b.hasComments), boolInt(b.hasCover), orEmpty(b.pubdate), b.pubdateSrc,
+			written+1, workID, b.title, nullable(b.isbn13), nullable(b.googleID), b.publisher, pi.Norm, b.format,
+			b.lang, boolInt(b.hasComments), boolInt(b.hasCover), nullable(b.pubdate), b.pubdateSrc,
 			nullableFloat(b.personal)); err != nil {
 			return 0, err
 		}
@@ -220,13 +220,6 @@ func Seed(d *store.DB) (int, error) {
 		return 0, err
 	}
 	return written, nil
-}
-
-func orEmpty(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }
 
 func boolInt(b bool) int {

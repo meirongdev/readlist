@@ -28,7 +28,9 @@ main { max-width: 860px; margin: 24px auto; padding: 0 16px; }
 .slider-row label { width: 92px; color: var(--muted); }
 .slider-row input[type=range] { flex: 1; }
 .slider-row .val { width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
-.reset { font-size: 12px; margin-left: auto; color: var(--accent2); background: none; border: none; cursor: pointer; }
+.reset { font-size: 12px; color: var(--accent2); background: none; border: none; cursor: pointer; padding: 0; }
+.slider-foot { display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 12px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
 
 ol.ranking { list-style: none; margin: 0; padding: 0; }
 li.book { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
@@ -41,6 +43,7 @@ li.book { background: #fff; border: 1px solid var(--line); border-radius: 10px; 
 .badge-A { background: #dcfce7; color: var(--ok); }
 .badge-B { background: #fef3c7; color: var(--warn); }
 .badge-C { background: #fee2e2; color: var(--bad); }
+.badge-D { background: #f3f4f6; color: var(--muted); }
 .badge-read { background: #dcfce7; color: var(--ok); }
 .badge-reading { background: #e0f2fe; color: #075985; }
 .badge-wish { background: #ede9fe; color: #5b21b6; }

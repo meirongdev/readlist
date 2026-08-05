@@ -2,86 +2,83 @@ package api
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/meirongdev/readlist/internal/score"
 )
 
-// loadDims 加载 run 的全部 dim_scores(work_id → dim → DimScore)。
-func (s *Server) loadDims(runID string) map[string]map[string]score.DimScore {
-	if runID == "" {
-		return map[string]map[string]score.DimScore{}
-	}
-	rows, err := s.query().SQL().Query(
-		`SELECT work_id, dim, raw, pct, score, state, source, confidence FROM dim_scores WHERE run_id=?`, runID)
-	if err != nil {
-		return map[string]map[string]score.DimScore{}
-	}
-	defer rows.Close()
-	out := map[string]map[string]score.DimScore{}
-	for rows.Next() {
-		var wid, dim, state, source string
-		var raw, pct, scr, conf float64
-		if err := rows.Scan(&wid, &dim, &raw, &pct, &scr, &state, &source, &conf); err != nil {
-			continue
-		}
-		if out[wid] == nil {
-			out[wid] = map[string]score.DimScore{}
-		}
-		out[wid][dim] = score.DimScore{Raw: raw, Pct: pct, Score: scr, State: score.State(state), Source: source, Confidence: conf}
-	}
-	return out
-}
-
 func (s *Server) handleWork(w http.ResponseWriter, r *http.Request) {
 	workID := r.PathValue("id")
-	runID, _ := s.publishedRun()
-	if runID == "" {
-		writeError(w, http.StatusNotFound, "no published run")
+	snap, ok := s.loadSnapshot(w, r)
+	if !ok {
 		return
 	}
-	bases, editions, _ := s.loadWorkBases()
-	b, ok := bases[workID]
-	if !ok {
+	b, found := snap.Bases[workID]
+	if !found {
 		writeError(w, http.StatusNotFound, "unknown work")
 		return
 	}
-	grades, _ := s.loadGrades(runID)
-	dims := s.loadDims(runID)
-	reading, _ := s.readingByWork(editions)
 
-	// 缺失维度说明(供 C 级"数据不足"解释)。
+	// 缺失维度说明(前端据此展示"数据不足"而不是一个编出来的 0 分)。
 	missing := []map[string]string{}
-	for dim, d := range dims[workID] {
-		if d.State == "unknown" {
-			missing = append(missing, map[string]string{"dim": dim, "why": missingWhy(dim)})
-		}
+	for _, dim := range missingDims(snap.Dims[workID]) {
+		missing = append(missing, map[string]string{"dim": dim, "why": missingWhy(dim)})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"work_id": workID, "title": b.Title, "author": b.Author,
-		"topic": b.Topic, "level": b.Level, "grade": grades[workID],
-		"run_id": runID, "standard_version": "1.0",
-		"dims":     dims[workID],
+		"topic": b.Topic, "level": b.Level, "publisher": b.Publisher,
+		"year": b.Year, "language": b.Language,
+		"grade":  snap.Grades[workID],
+		"run_id": snap.RunID, "standard_version": snap.Version,
+		"dims":     snap.Dims[workID],
 		"missing":  missing,
-		"editions": editions[workID],
-		"reading":  reading[workID],
-		"links": map[string]string{
-			"google_books": "https://www.google.com/books/edition/_/" + b.Title,
-			"openlibrary":  "https://openlibrary.org/search?q=" + b.Title,
-		},
+		"editions": snap.Editions[workID],
+		"reading":  snap.Reading[workID],
+		"links":    externalLinks(b, snap.Editions[workID]),
 	})
 }
 
+// externalLinks 外链。封面与阅读入口一律外链,本站不保存正文(NFR-12)。
+//
+// 有强标识符就直连该条目,否则退回搜索 —— 查询串必须转义:之前是把书名直接拼进
+// 路径("https://…/edition/_/" + title),带空格的书名产出的是一条坏链。
+func externalLinks(b workBase, editions []editionRow) map[string]string {
+	var isbn, volumeID string
+	for _, e := range editions {
+		if volumeID == "" {
+			volumeID = strings.TrimSpace(e.GoogleVolumeID)
+		}
+		if isbn == "" {
+			isbn = strings.TrimSpace(e.ISBN13)
+		}
+	}
+	q := strings.TrimSpace(b.Title + " " + b.Author)
+
+	google := "https://www.google.com/search?tbm=bks&q=" + url.QueryEscape(q)
+	if volumeID != "" {
+		google = "https://books.google.com/books?id=" + url.QueryEscape(volumeID)
+	}
+	openlib := "https://openlibrary.org/search?q=" + url.QueryEscape(q)
+	if isbn != "" {
+		openlib = "https://openlibrary.org/isbn/" + url.PathEscape(isbn)
+	}
+	return map[string]string{"google_books": google, "openlibrary": openlib}
+}
+
 func missingWhy(dim string) string {
-	switch dim {
-	case "F":
+	switch score.Dim(dim) {
+	case score.DimFreshness:
 		return "出版日期不可信或缺失"
-	case "T":
+	case score.DimTrust:
 		return "作者与出版社均未知"
-	case "D":
+	case score.DimDepth, score.DimPractical:
 		return "标注置信度低"
-	case "P":
-		return "标注置信度低"
+	case score.DimAcclaim:
+		return "无外部评分"
+	case score.DimCommunity:
+		return "无 HN 提及"
 	default:
 		return "证据不足"
 	}

@@ -42,30 +42,34 @@ func (w *WorkInput) Compute(p DimParams, now time.Time) map[Dim]DimResult {
 	}
 }
 
-// acclaim 口碑:IMDb 式贝叶斯加权(scoring-standard §3 A),多源按 v 加权合并。
+// acclaim 口碑:IMDb 式贝叶斯加权(scoring-standard §3 A)。
+//
+// 多源评分先在 work 级**汇总**(Σ 人数、人数加权均分),再整体收缩**一次**。
+// 不能逐源各收缩一次再加权平均 —— 那会把同一本书被拆散的评分人数各自往先验拉,
+// 系统性低估多版次/多源的书(review M6:3,000 人的评分被当成 3 × 600 算)。
 func (w *WorkInput) acclaim(p DimParams) DimResult {
-	if len(w.Ratings) == 0 {
-		return DimResult{Raw: p.AcclaimPrior, State: StateShrunk, Source: "prior"}
-	}
-	m := math.Max(p.MinCount, 1)
-	var num, den float64
+	var sumRV, sumV float64
 	for _, r := range w.Ratings {
 		if r.Count <= 0 {
 			continue
 		}
-		v := float64(r.Count)
-		a := v/(v+m)*r.Rating + m/(v+m)*p.AcclaimPrior
-		num += a * v
-		den += v
+		sumRV += r.Rating * float64(r.Count)
+		sumV += float64(r.Count)
 	}
-	if den == 0 {
+	if sumV == 0 {
 		return DimResult{Raw: p.AcclaimPrior, State: StateShrunk, Source: "prior"}
 	}
-	return DimResult{Raw: num / den, State: StateMeasured, Source: "external-ratings", Count: int(den)}
+	m := math.Max(p.MinCount, 1)
+	mean := sumRV / sumV
+	raw := sumV/(sumV+m)*mean + m/(sumV+m)*p.AcclaimPrior
+	return DimResult{Raw: raw, State: StateMeasured, Source: "external-ratings", Count: int(sumV)}
 }
 
 // community 技术圈声量:时间衰减提及数(scoring-standard §3 C,τ=4 年)。
 func (w *WorkInput) community(now time.Time) DimResult {
+	if len(w.Mentions) == 0 {
+		return DimResult{Raw: 0, State: StateShrunk, Source: "prior"}
+	}
 	tau := 4.0
 	var sum float64
 	for _, m := range w.Mentions {
@@ -74,9 +78,6 @@ func (w *WorkInput) community(now time.Time) DimResult {
 			age = 0
 		}
 		sum += 1 / (1 + age/tau)
-	}
-	if len(w.Mentions) == 0 {
-		return DimResult{Raw: 0, State: StateShrunk, Source: "prior"}
 	}
 	return DimResult{Raw: sum, State: StateMeasured, Source: "hn-algolia"}
 }
@@ -119,22 +120,17 @@ func (w *WorkInput) trust() DimResult {
 // conf ≥ 0.7 → measured;0.5 ≤ conf < 0.7 → shrunk;否则 unknown(不用于榜单)。
 func dimByLabel(conf, value float64) DimResult {
 	if conf >= 0.7 {
-		return DimResult{Raw: value, State: StateMeasured, Source: "llm-label"}
+		return DimResult{Raw: value, State: StateMeasured, Source: "llm-label", Conf: conf}
 	}
 	if conf >= 0.5 {
-		return DimResult{Raw: value, State: StateShrunk, Source: "llm-label-lowconf"}
+		return DimResult{Raw: value, State: StateShrunk, Source: "llm-label-lowconf", Conf: conf}
 	}
-	return DimResult{Raw: 50, State: StateUnknown, Source: "no-label"}
+	return DimResult{Raw: 50, State: StateUnknown, Source: "no-label", Conf: conf}
 }
 
 // readability 馆藏可读性:纯本地 100% 可算(scoring-standard §3 L)。
 func (w *WorkInput) readability() DimResult {
-	fs := map[string]float64{"EPUB": 1.0, "AZW3": 0.8, "MOBI": 0.8}[strings.ToUpper(w.Format)]
-	if fs == 0 {
-		fs = 0.5 // PDF 及其他
-	}
-	var raw float64
-	raw += 30 * fs
+	raw := 30 * corpus.FormatReadability(w.Format)
 	if w.HasCover {
 		raw += 20
 	}
@@ -151,7 +147,12 @@ func (w *WorkInput) readability() DimResult {
 }
 
 // Grade 证据等级徽章(system-design §2):
-// A=全维 measured,B=有 shrunk,C=主要靠本地,D=关键维(F/T) unknown。
+// A=全维 measured,B=有 shrunk 但有外部信号,C=主要靠本地元数据,D=关键维(F/T) unknown。
+//
+// ⚠️ 这个字母**只是 UI 徽章,不决定任何准入** —— 榜单准入由 preset 的
+// needs + min_coverage 逐维判定(见 Engine.selectList)。把它当全局闸门用,会让
+// 一本 pubdate 被 mtime 污染的 O'Reilly 经典无法进入「明确声明不关心出版日期」的
+// timeless 榜(review B1,实测影响全库 23%)。
 func Grade(dims map[Dim]DimScore) string {
 	if dims[DimFreshness].State == StateUnknown || dims[DimTrust].State == StateUnknown {
 		return "D"

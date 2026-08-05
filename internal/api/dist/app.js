@@ -2,27 +2,36 @@
 const $ = (sel) => document.querySelector(sel);
 const app = $("#app");
 
+const DIM_ORDER = ["A", "C", "F", "T", "D", "P", "readability"];
 const DIM_LABEL = { A: "口碑", C: "技术圈声量", F: "时效", T: "权威", D: "深度", P: "可操作", readability: "馆藏可读性" };
 const STATE_LABEL = { measured: "实测", shrunk: "收缩", unknown: "未知" };
 
-let meta = null, lists = [], currentList = null, currentItems = [];
-let weights = {}, order = "desc";
+let meta = null;
+let lists = [];
+let currentList = null; // 当前榜的完整口径:weights / bands / order / min_coverage
+let currentItems = [];
+let weights = {}; // 用户拖动后的权重(currentList.weights 的可变副本)
 
 async function api(path) {
   const r = await fetch(path);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
   return r.json();
 }
 
-function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 function fmt(n) { return n == null ? "—" : Number(n).toFixed(1); }
+function clone(o) { return JSON.parse(JSON.stringify(o ?? {})); }
 
-function gradeBadge(g) { return g ? `<span class="badge badge-${g}">${g} 级</span>` : ""; }
+function gradeBadge(g) { return g ? `<span class="badge badge-${esc(g)}">${esc(g)} 级</span>` : ""; }
+
 function readingBadges(item) {
   if (!item.reading || !item.reading.has_reading) return "";
-  const map = { read: ["badge-read", "✓ 已读"], reading: ["badge-reading", "◐ 在读"], unread: [] };
+  const map = { read: ["badge-read", "✓ 已读"], reading: ["badge-reading", "◐ 在读"] };
   let s = "";
-  if (map[item.reading.status]) s += `<span class="badge ${map[item.reading.status][0]}">${map[item.reading.status][1]}</span>`;
+  const hit = map[item.reading.status];
+  if (hit) s += `<span class="badge ${hit[0]}">${hit[1]}</span>`;
   (item.reading.shelves || []).forEach((sh) => {
     if (sh === "弃读") return; // 弃读默认不公开
     s += `<span class="badge badge-shelf">☆ ${esc(sh)}</span>`;
@@ -30,89 +39,142 @@ function readingBadges(item) {
   return s;
 }
 
-/* ---- 权重滑块:纯客户端点积 + band + coverage(与后端公式一致) ---- */
+/* ---- 权重滑块:纯客户端点积 + band + coverage(与后端 score.Combine 同一套公式) ---- */
+
 function effectiveScore(dim, d, bands) {
+  // unknown 维度不参与:它的 score 字段只是占位的 0,不是"这一维得了 0 分"。
   if (!d || d.state === "unknown") return null;
-  if (bands && bands[dim]) { const b = bands[dim]; const v = 100 * (1 - Math.abs(d.score - b.target) / b.tol); return Math.max(0, v); }
+  const b = bands && bands[dim];
+  if (b && b.tol > 0) return Math.max(0, 100 * (1 - Math.abs(d.score - b.target) / b.tol));
   return d.score;
 }
+
 function rescore(item, bands) {
   let totalW = 0, availW = 0, acc = 0;
   for (const dim in weights) totalW += weights[dim] || 0;
   for (const dim in weights) {
     const w = weights[dim] || 0;
-    const d = item.dims[dim];
-    const eff = effectiveScore(dim, d, bands);
+    const eff = effectiveScore(dim, (item.dims || {})[dim], bands);
     if (eff == null) continue;
-    availW += w; acc += w * eff;
+    availW += w;
+    acc += w * eff;
   }
   const coverage = totalW > 0 ? availW / totalW : 0;
-  const tbs = coverage > 0 ? acc / coverage : 0;
-  return { tbs, coverage };
+  return { tbs: coverage > 0 ? acc / coverage : 0, coverage };
 }
-function renderList() {
+
+function rankedItems() {
   const bands = (currentList && currentList.bands) || {};
-  const items = currentItems.map((it) => Object.assign({}, it, rescore(it, bands)));
-  items.sort((a, b) => (order === "asc" ? a.tbs - b.tbs : b.tbs - a.tbs));
+  const minCoverage = (currentList && currentList.min_coverage) || 0;
+  const asc = currentList && currentList.order === "asc";
+  const scored = currentItems.map((it) => Object.assign({}, it, rescore(it, bands)));
+  // coverage 是真实的准入条件(后端同样如此):权重调过之后覆盖不足的书要退出这份榜。
+  const kept = scored.filter((it) => it.coverage + 1e-9 >= minCoverage);
+  kept.sort((a, b) => (a.tbs === b.tbs ? a.work_id.localeCompare(b.work_id) : asc ? a.tbs - b.tbs : b.tbs - a.tbs));
+  return { kept, hidden: scored.length - kept.length };
+}
+
+function renderRanking() {
+  const { kept, hidden } = rankedItems();
+  const wrap = document.createElement("div");
+  wrap.className = "ranking-wrap";
+
+  if (!kept.length) {
+    wrap.innerHTML = `<p class="loading">当前权重下没有书达到覆盖率门槛（min_coverage ${(currentList.min_coverage || 0).toFixed(2)}）。</p>`;
+    return wrap;
+  }
+
   const ol = document.createElement("ol");
   ol.className = "ranking";
-  for (const it of items) {
+  kept.forEach((it, i) => {
     const li = document.createElement("li");
     li.className = "book";
+    // 位次按当前排序重新编号 —— 拖过滑块之后沿用服务端的原始 rank 是错的。
     li.innerHTML = `
       <div class="book-top">
-        <span class="rank-no">${it.rank}</span>
+        <span class="rank-no">${i + 1}</span>
         <span class="book-title"><a href="#/book/${encodeURIComponent(it.work_id)}">${esc(it.title)}</a></span>
         ${gradeBadge(it.grade)}${readingBadges(it)}
         <span class="tbs">${fmt(it.tbs)}<small> 分</small></span>
       </div>
       <div class="book-meta">${esc(it.author || "")}${it.year ? " · " + it.year : ""}${it.topic ? " · " + esc(it.topic) : ""}</div>
-      <div class="reason">${it.reason ? it.reason.replace(/^/, "<b>为什么：</b>") : ""}</div>
+      <div class="reason">${it.reason ? "<b>为什么：</b>" + esc(it.reason) : ""}</div>
       <div class="coverage">覆盖 ${Math.round(it.coverage * 100)}%</div>`;
     ol.appendChild(li);
+  });
+  wrap.appendChild(ol);
+  if (hidden > 0) {
+    const note = document.createElement("p");
+    note.className = "coverage";
+    note.textContent = `另有 ${hidden} 本在当前权重下覆盖率不足,已退出本榜。`;
+    wrap.appendChild(note);
   }
-  return ol;
+  return wrap;
 }
+
+function repaintRanking() {
+  const old = app.querySelector(".ranking-wrap");
+  if (old) old.replaceWith(renderRanking());
+}
+
 function sliderSection() {
+  const defaults = clone(currentList.weights);
+  const dims = DIM_ORDER.filter((d) => d in defaults);
+
   const el = document.createElement("div");
   el.className = "sliders";
-  const h = document.createElement("h3");
-  h.textContent = "权重滑块（纯客户端即时重排）";
-  el.appendChild(h);
-  const defaults = JSON.parse(JSON.stringify(weights));
-  for (const dim in defaults) {
+  const head = document.createElement("h3");
+  head.textContent = `权重滑块（${dims.length} 维,即时重排）`;
+  el.appendChild(head);
+
+  for (const dim of dims) {
     const row = document.createElement("div");
     row.className = "slider-row";
-    row.innerHTML = `<label>${DIM_LABEL[dim] || dim}</label>
-      <input type="range" min="0" max="1" step="0.05" value="${defaults[dim]}" data-dim="${dim}">
+    row.innerHTML = `<label>${esc(DIM_LABEL[dim] || dim)}</label>
+      <input type="range" min="0" max="1" step="0.05" value="${defaults[dim]}" data-dim="${esc(dim)}">
       <span class="val">${defaults[dim].toFixed(2)}</span>`;
     el.appendChild(row);
   }
+
+  const foot = document.createElement("div");
+  foot.className = "slider-foot";
+  // 说清楚重排的边界:滑块只在这份榜已选出的书里重排。要把榜外的书选进来,
+  // 需要重跑选材(去重 + 多样性约束),那不是客户端点积能做的事。
+  foot.innerHTML = `<span class="coverage">在本榜已选出的 ${currentItems.length} 本内重排；
+    换权重不会把榜外的书选进来（那需要重跑选材）。</span>`;
   const reset = document.createElement("button");
   reset.className = "reset";
   reset.textContent = "重置";
-  reset.onclick = () => { weights = JSON.parse(JSON.stringify(defaults)); renderPage(); };
-  el.appendChild(reset);
+  reset.onclick = () => {
+    weights = clone(defaults);
+    el.querySelectorAll("input[data-dim]").forEach((input) => {
+      input.value = defaults[input.dataset.dim];
+      input.parentElement.querySelector(".val").textContent = defaults[input.dataset.dim].toFixed(2);
+    });
+    repaintRanking();
+  };
+  foot.appendChild(reset);
+  el.appendChild(foot);
+
   el.addEventListener("input", (ev) => {
-    if (ev.target.dataset.dim) {
-      const dim = ev.target.dataset.dim;
-      weights[dim] = parseFloat(ev.target.value);
-      ev.target.parentElement.querySelector(".val").textContent = weights[dim].toFixed(2);
-      const ol = renderList();
-      const old = app.querySelector("ol.ranking");
-      if (old) old.replaceWith(ol);
-    }
+    const dim = ev.target.dataset && ev.target.dataset.dim;
+    if (!dim) return;
+    weights[dim] = parseFloat(ev.target.value);
+    ev.target.parentElement.querySelector(".val").textContent = weights[dim].toFixed(2);
+    repaintRanking();
   });
   return el;
 }
 
 async function renderHome(presetId) {
-  const id = presetId || (lists[0] && lists[0].id) || "timeless";
-  currentList = lists.find((l) => l.id === id) || lists[0];
-  const data = await api(`/api/v1/lists/${encodeURIComponent(currentList.id)}`);
+  const id = presetId || (lists[0] && lists[0].id);
+  if (!id) throw new Error("没有可用的榜单");
+  const data = await api(`/api/v1/lists/${encodeURIComponent(id)}`);
+  // 口径(weights/bands/order/min_coverage)以单榜响应里的 list 为准。
+  currentList = data.list || lists.find((l) => l.id === id) || {};
   currentItems = data.items || [];
-  weights = JSON.parse(JSON.stringify(currentList.weights || {}));
-  order = currentList.order || "desc";
+  weights = clone(currentList.weights);
+
   app.innerHTML = "";
   const bar = document.createElement("div");
   bar.className = "preset-bar";
@@ -124,16 +186,30 @@ async function renderHome(presetId) {
     bar.appendChild(b);
   }
   app.appendChild(bar);
+
   const desc = document.createElement("p");
   desc.className = "preset-desc";
   desc.textContent = currentList.description || "";
   app.appendChild(desc);
-  app.appendChild(sliderSection());
-  app.appendChild(renderList());
+
+  if (Object.keys(weights).length) app.appendChild(sliderSection());
+  app.appendChild(renderRanking());
 }
 
 async function renderDetail(workId) {
   const data = await api(`/api/v1/works/${encodeURIComponent(workId)}`);
+  const dims = data.dims || {};
+  const rows = DIM_ORDER.filter((d) => d in dims).map((dim) => {
+    const d = dims[dim];
+    // unknown 一律显示「—」:那个 0 是占位符,不是得分。把它印成 0.0 会让访客
+    // 以为这一维评过分且垫底。
+    const cell = (v) => (d.state === "unknown" ? "—" : fmt(v));
+    return `<tr><td>${esc(DIM_LABEL[dim] || dim)}</td><td><b>${cell(d.score)}</b></td>
+      <td>${cell(d.pct)}</td><td>${cell(d.raw)}</td>
+      <td><span class="state">${esc(STATE_LABEL[d.state] || d.state)}</span></td>
+      <td>${esc(d.source || "")}</td></tr>`;
+  }).join("");
+
   app.innerHTML = `
     <div class="detail-head">
       <h1>${esc(data.title)} ${gradeBadge(data.grade)}</h1>
@@ -143,17 +219,16 @@ async function renderDetail(workId) {
     <h2 class="sec">得分拆解（standard_version ${esc(data.standard_version)}）</h2>
     <table class="dims-table">
       <thead><tr><th>维度</th><th>得分</th><th>百分位</th><th>原始值</th><th>状态</th><th>数据来源</th></tr></thead>
-      <tbody>${Object.entries(data.dims).map(([dim, d]) => `
-        <tr><td>${DIM_LABEL[dim] || dim}</td><td><b>${fmt(d.score)}</b></td>
-        <td>${fmt(d.pct)}</td><td>${fmt(d.raw)}</td>
-        <td><span class="state">${STATE_LABEL[d.state] || d.state}</span></td>
-        <td>${esc(d.source || "")}</td></tr>`).join("")}
-      </tbody>
+      <tbody>${rows}</tbody>
     </table>
-    ${data.missing && data.missing.length ? `<div class="missing-box warn"><b>数据不足</b>：缺少 ${data.missing.map((m) => DIM_LABEL[m.dim] + "（" + m.why + "）").join("、")}</div>` : ""}
+    ${(data.missing || []).length ? `<div class="missing-box warn"><b>数据不足</b>：缺少 ${
+      data.missing.map((m) => esc(DIM_LABEL[m.dim] || m.dim) + "（" + esc(m.why) + "）").join("、")
+    }。这几维不参与需要它们的榜单,也不会被当成 0 分计入。</div>` : ""}
     <h2 class="sec">本库持有的版次</h2>
     <div class="editions">${(data.editions || []).map((e) => `
-      <div>${esc(e.title)} · ${esc(e.format || "")} · ${esc(e.language || "")} · ${esc(e.publisher || "")} · ${esc(e.pubdate || "")}${e.personal_rating ? " · ★ " + e.personal_rating : ""}</div>`).join("") || "无"}</div>
+      <div>${esc(e.title)} · ${esc(e.format || "")} · ${esc(e.language || "")} · ${esc(e.publisher || "")} · ${esc(e.pubdate || "")}${
+        e.pubdate_source ? "（来源 " + esc(e.pubdate_source) + "）" : ""
+      }${e.personal_rating ? " · ★ " + esc(e.personal_rating) : ""}</div>`).join("") || "无"}</div>
     <p class="sub">封面与阅读入口一律外链，本站不保存正文。<br>
       <a href="${esc(data.links.google_books)}" target="_blank" rel="noopener">Google Books</a> ·
       <a href="${esc(data.links.openlibrary)}" target="_blank" rel="noopener">OpenLibrary</a></p>`;
@@ -162,12 +237,15 @@ async function renderDetail(workId) {
 async function renderCatalog() {
   const data = await api("/api/v1/catalog");
   app.innerHTML = `<h1>全库目录（${data.total}）</h1>
-    <p class="preset-desc">A/B 级可上榜；C 级仅在此目录页展示并标注「数据不足」。</p>
+    <p class="preset-desc">目录收录全库。缺少关键维度的书会标注「数据不足」——
+      它进不了需要那几维的榜单,但不会从站上消失。</p>
     <ul class="catalog-grid">${data.works.map((w) => `
       <li class="cat-row">
         <span class="cat-title"><a href="#/book/${encodeURIComponent(w.work_id)}">${esc(w.title)}</a></span>
         ${gradeBadge(w.grade)}
-        ${w.grade === "C" ? '<span class="insufficient">数据不足</span>' : ""}
+        ${(w.missing || []).length ? `<span class="insufficient">数据不足（缺 ${
+          w.missing.map((d) => esc(DIM_LABEL[d] || d)).join("、")
+        }）</span>` : ""}
         <span class="cat-meta">${esc(w.author || "")}${w.year ? " · " + w.year : ""}${w.topic ? " · " + esc(w.topic) : ""}</span>
       </li>`).join("")}</ul>`;
 }
@@ -175,20 +253,22 @@ async function renderCatalog() {
 async function route() {
   const hash = location.hash || "#/";
   try {
-    if (hash.startsWith("#/book/")) return renderDetail(decodeURIComponent(hash.slice(7)));
-    if (hash.startsWith("#/list/")) return renderHome(decodeURIComponent(hash.slice(7)));
-    if (hash.startsWith("#/catalog")) return renderCatalog();
-    return renderHome();
+    // 必须 await:直接 return 一个 promise 会让它的 rejection 逃出 catch,
+    // 页面就永远停在"加载中"。
+    if (hash.startsWith("#/book/")) return await renderDetail(decodeURIComponent(hash.slice(7)));
+    if (hash.startsWith("#/list/")) return await renderHome(decodeURIComponent(hash.slice(7)));
+    if (hash.startsWith("#/catalog")) return await renderCatalog();
+    return await renderHome();
   } catch (e) {
-    app.innerHTML = `<p class="loading">出错了：${esc(e.message)}。请先运行 <code>readlist seed && readlist score</code>。</p>`;
+    app.innerHTML = `<p class="loading">出错了：${esc(e.message)}。若是首次启动，请先运行
+      <code>readlist seed &amp;&amp; readlist score</code>。</p>`;
   }
 }
 
 (async function init() {
   try {
     meta = await api("/api/v1/meta");
-    const ldata = await api("/api/v1/lists");
-    lists = ldata.lists || [];
+    lists = (await api("/api/v1/lists")).lists || [];
   } catch (e) {
     app.innerHTML = `<p class="loading">无法连接 API：${esc(e.message)}</p>`;
     return;

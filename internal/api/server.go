@@ -2,8 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/meirongdev/readlist/internal/preset"
 	"github.com/meirongdev/readlist/internal/store"
@@ -54,6 +54,32 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// fail 记录内部错误并回 500。数据库出问题必须是可见的失败,而不是静默的空数据 ——
+// 后者在排障时表现为「榜单突然空了但一切正常」。
+func fail(w http.ResponseWriter, r *http.Request, err error, what string) {
+	slog.Error("request failed", "path", r.URL.Path, "op", what, "err", err)
+	writeError(w, http.StatusInternalServerError, "internal error")
+}
+
+// loadSnapshot 取已发布 run 的只读视图;未打分时返回 ok=false 并已写好响应。
+func (s *Server) loadSnapshot(w http.ResponseWriter, r *http.Request) (*snapshot, bool) {
+	runID, version, err := s.publishedRun()
+	if err != nil {
+		fail(w, r, err, "published_run")
+		return nil, false
+	}
+	if runID == "" {
+		writeError(w, http.StatusNotFound, "no published run")
+		return nil, false
+	}
+	snap, err := s.snapshot(runID, version)
+	if err != nil {
+		fail(w, r, err, "snapshot")
+		return nil, false
+	}
+	return snap, true
+}
+
 // publicPresets 过滤 internal 榜。
 func (s *Server) publicPresets() []preset.Preset {
 	out := make([]preset.Preset, 0, len(s.presets))
@@ -73,8 +99,3 @@ func presetByID(presets []preset.Preset, id string) (preset.Preset, bool) {
 	}
 	return preset.Preset{}, false
 }
-
-// query 便捷访问底层 SQL。
-func (s *Server) query() *store.DB { return s.db }
-
-func splitShell(s string) []string { return strings.Fields(s) }
