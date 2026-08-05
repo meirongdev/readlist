@@ -32,6 +32,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # make 的目标带 GOPROXY=off,所以依赖要先显式拉下来(同 ci.yml 的说明)。
+      - name: 下载依赖
+        run: go mod download
+
       # 先跑测试再推镜像:推出去的东西不该没过门禁。
       - name: 门禁(go test)
         run: make test-go

@@ -30,6 +30,15 @@ jobs:
       - name: 确认 node 就位(否则 test-spa 会静默跳过)
         run: node --version
 
+      # 必须显式下载:make 的目标一律带 GOPROXY=off(用来证明构建过程不外联),
+      # 而 setup-go 的 cache 只负责恢复/保存缓存、不会拉依赖 —— 缓存为空时
+      # (首次运行、go.sum 变更后)GOPROXY=off 会直接报 module lookup disabled。
+      - name: 下载依赖(这一步是唯一允许联网的)
+        run: go mod download
+
+      - name: 校验依赖完整性
+        run: go mod verify
+
       - name: fmt + vet + go test + spa 一致性
         run: make check
 
