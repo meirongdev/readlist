@@ -5,6 +5,7 @@
 > 并标注每本书的**阅读状态**。公开站只发元数据与评分，**不发书**。
 
 **状态**：✅ 全管道已实现（`snapshot` → `ingest` → `score` → `serve`），kind 端到端通过，镜像 CI 就位。
+✅ 三轮评审的阻塞级缺陷均已修（见下方文档表），公开面已具备抗爬与观测能力。
 🟡 上线剩余工作在 **homelab 仓库**（清单登记 + 备份归属）与 Cloudflare（限流）——
 见 [docs/homelab-deploy.md](docs/homelab-deploy.md)。
 **日期**：2026-08-05
@@ -38,7 +39,8 @@
 | [docs/reading-status.md](docs/reading-status.md) | **阅读状态**：真相源、状态模型、补录、最小导出 |
 | [docs/architecture.md](docs/architecture.md) | 架构、数据模型、部署形状 |
 | [docs/mvp.md](docs/mvp.md) | **MVP 实现**：命令、API、kind 端到端验证 |
-| [docs/review-2026-08-05.md](docs/review-2026-08-05.md) | **实现评审**：4 个阻塞级缺陷（可复现性 / 准入闸门 / 公开面 / 滑块）与修法 |
+| [docs/review-2026-08-05.md](docs/review-2026-08-05.md) | **实现评审（二轮）**：4 个阻塞级缺陷（可复现性 / 准入闸门 / 公开面 / 滑块）与修法 |
+| [docs/review-2026-08-05-b.md](docs/review-2026-08-05-b.md) | **实现评审（三轮，面向上线）**：4 个阻塞级（出版社归一 / 污染日期 / TTL / 证据绑定）+ 观测与抗爬 |
 | [docs/homelab-deploy.md](docs/homelab-deploy.md) | **上线剩余工作归档**：homelab 清单 / 镜像 CI / 数据管道 / 备份 / 限流 |
 | [docs/roadmap.md](docs/roadmap.md) | 分期落地、风险、开放问题 |
 
