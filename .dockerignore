@@ -1,0 +1,7 @@
+.git
+bin/
+docs/
+*.db
+*.db-wal
+*.db-shm
+deploy/kind/.kind-state/

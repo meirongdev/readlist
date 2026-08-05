@@ -4,7 +4,7 @@
 > 把私有 Calibre 书库（2,054 本）按 **7 个独立维度**打分，榜单 = 维度分上的**权重档案**，
 > 并标注每本书的**阅读状态**。公开站只发元数据与评分，**不发书**。
 
-**状态**：📐 需求分析完成，未开工。
+**状态**：✅ MVP 已实现并通过本地 kind 端到端验证（2026-08-05）。
 **日期**：2026-08-04
 
 ---
@@ -35,6 +35,8 @@
 | [docs/scoring-standard.md](docs/scoring-standard.md) | **评分标准 TBS v1.0** 规格：7 维公式、归一化、证据分级、榜单预设 |
 | [docs/reading-status.md](docs/reading-status.md) | **阅读状态**：真相源、状态模型、补录、最小导出 |
 | [docs/architecture.md](docs/architecture.md) | 架构、数据模型、部署形状 |
+| [docs/mvp.md](docs/mvp.md) | **MVP 实现**：命令、API、kind 端到端验证 |
+| [docs/homelab-deploy.md](docs/homelab-deploy.md) | **上线剩余工作归档**：homelab 清单 / 镜像 CI / 数据管道 / 备份 / 限流 |
 | [docs/roadmap.md](docs/roadmap.md) | 分期落地、风险、开放问题 |
 
 ## 两条必须先知道的实测结论

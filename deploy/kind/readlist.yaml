@@ -1,0 +1,119 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: readlist
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: readlist-config
+  namespace: readlist
+data:
+  DB_PATH: /data/readlist.db
+  API_LISTEN_ADDR: ":8080"
+  EXPOSE_READ_STATUS: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: readlist-data
+  namespace: readlist
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 100Mi
+---
+# 单副本 + Recreate(SQLite 单写锁;滚动更新会抢锁)—— architecture.md NFR-6
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: readlist
+  namespace: readlist
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: readlist }
+  template:
+    metadata:
+      labels: { app: readlist }
+    spec:
+      securityContext:
+        fsGroup: 65532
+      initContainers:
+        # 先建库再打分;distroless 无 shell,直接调用 readlist init。
+        - name: init-data
+          image: readlist:dev
+          imagePullPolicy: IfNotPresent
+          command: ["readlist", "init"]
+          envFrom: [{ configMapRef: { name: readlist-config } }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+      containers:
+        - name: readlist
+          image: readlist:dev
+          imagePullPolicy: IfNotPresent
+          command: ["readlist", "serve"]
+          envFrom: [{ configMapRef: { name: readlist-config } }]
+          ports: [{ containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: readlist-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: readlist
+  namespace: readlist
+spec:
+  type: NodePort
+  selector: { app: readlist }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30080
+---
+# 每夜重算评分(system-design §1 原子发布由 published_run 指针承担)。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: readlist-score
+  namespace: readlist
+spec:
+  schedule: "17 1 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            fsGroup: 65532
+          containers:
+            - name: score
+              image: readlist:dev
+              imagePullPolicy: IfNotPresent
+              command: ["readlist", "score"]
+              envFrom: [{ configMapRef: { name: readlist-config } }]
+              volumeMounts: [{ name: data, mountPath: /data }]
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+          volumes:
+            - name: data
+              persistentVolumeClaim: { claimName: readlist-data }

@@ -1,0 +1,26 @@
+# EditorConfig — https://editorconfig.org
+root = true
+
+# 默认：2 空格（SPA 是 HTML/CSS/JS/JSON/YAML）
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Go 用 tab（gofmt）
+[*.go]
+indent_style = tab
+
+[{go.mod,go.sum}]
+indent_style = tab
+
+# Makefile 配方需要真实 tab
+[Makefile]
+indent_style = tab
+
+# Markdown 保留行尾空白（两个空格 = 硬换行）
+[*.md]
+trim_trailing_whitespace = false

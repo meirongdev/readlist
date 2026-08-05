@@ -1,0 +1,24 @@
+# Go 构建产物
+bin/
+*.test
+*.out
+coverage.out
+
+# 本地 SQLite 数据（seed/score 产物，可随时重建）
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# 运行与临时文件
+*.log
+*.tmp
+.DS_Store
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+
+# kind / docker 本地产物
+deploy/kind/.kind-state/

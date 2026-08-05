@@ -1,0 +1,82 @@
+# readlist 榜单预设 —— 权重档案(system-design §5 选材层)
+# 加榜 = 加一段 YAML,不改代码、不重算分数。
+
+- id: timeless
+  name: 经典长青
+  description: 经历过时间检验、值得反复读的经典技术书
+  weights: { A: 0.30, C: 0.25, T: 0.25, D: 0.10, readability: 0.10 }
+  bands: { D: { target: 75, tol: 35 } }
+  needs: { A: measured, C: measured, T: measured }
+  select: { size: 20, max_per_topic: 2, max_per_author: 1, min_coverage: 0.7 }
+  filters: { min_age_years: 3 }
+  order: desc
+  visibility: public
+
+- id: ship-this-week
+  name: 最快上手
+  description: 这周就能读完并开始动手的书
+  weights: { F: 0.30, P: 0.35, A: 0.20, readability: 0.15 }
+  bands: { D: { target: 35, tol: 25 } }
+  needs: { F: measured, P: measured }
+  select: { size: 20, max_per_topic: 3, max_per_author: 1, min_coverage: 0.7 }
+  filters: { level: [beginner, intermediate] }
+  order: desc
+  visibility: public
+
+- id: deep-dive
+  name: 深挖原理
+  description: 概念密度高、需要慢慢啃的原理书
+  weights: { D: 0.35, T: 0.25, A: 0.25, C: 0.15 }
+  needs: { D: measured }
+  select: { size: 20, max_per_topic: 2, max_per_author: 1, min_coverage: 0.7 }
+  filters: { level: [advanced, reference] }
+  order: desc
+  visibility: public
+
+- id: new-2026
+  name: 今年新书
+  description: 2026 年出版、出版日期可信的新书
+  weights: { A: 0.30, C: 0.25, P: 0.25, T: 0.20 }
+  needs: { F: measured }
+  select: { size: 20, max_per_topic: 3, max_per_author: 1, min_coverage: 0.6 }
+  filters: { pubdate_year: 2026, pubdate_source: [google, openlibrary, file-meta] }
+  order: desc
+  visibility: public
+
+- id: ai-llm
+  name: AI / LLM 专题
+  description: 大模型与机器学习方向的技术书
+  weights: { F: 0.35, P: 0.25, A: 0.25, C: 0.15 }
+  needs: { F: measured }
+  select: { size: 20, max_per_topic: 3, max_per_author: 1, min_coverage: 0.6 }
+  filters: { topics_any: [ai, llm, ml, nlp, deep-learning, machine-learning] }
+  order: desc
+  visibility: public
+
+- id: to-read-next
+  name: 下一本读什么
+  description: 高分 ∩ 未读 —— 把客观排行变成阅读队列
+  weights: { A: 0.30, C: 0.25, T: 0.20, P: 0.15, readability: 0.10 }
+  needs: { A: measured, T: measured }
+  select: { size: 20, max_per_topic: 2, max_per_author: 1, min_coverage: 0.7 }
+  filters: { read_status: [unread], not_in_shelf: [弃读] }
+  order: desc
+  visibility: public
+
+- id: read-and-loved
+  name: 我读过且推荐
+  description: 作者真读过且个人评分高 —— 真人推荐比算法分可信
+  weights: { A: 0.40, T: 0.30, D: 0.30 }
+  needs: { A: measured, T: measured, D: measured }
+  select: { size: 20, max_per_topic: 3, max_per_author: 1, min_coverage: 0.7 }
+  filters: { read_status: [read], min_personal_rating: 4 }
+  order: desc
+  visibility: public
+
+- id: library-hygiene
+  name: 待补元数据
+  description: 馆藏可读性最低、最该补元数据的书(内部榜)
+  weights: { readability: 1.0 }
+  select: { size: 30, max_per_topic: 5, max_per_author: 3, min_coverage: 1.0 }
+  order: asc
+  visibility: internal
