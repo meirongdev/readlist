@@ -75,7 +75,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: readlist
-          image: ghcr.io/meirongdev/readlist:v0.1.0 # ← 换成 CI 推出的 tag/digest
+          image: ghcr.io/meirongdev/readlist:v0.3.0 # ← 换成 CI 推出的 tag/digest
           command: ["readlist", "serve"]
           envFrom: [{ configMapRef: { name: readlist-config } }]
           ports: [{ name: http, containerPort: 8080 }]
@@ -169,7 +169,7 @@ spec:
             fsGroup: 65532
           containers:
             - name: snapshot
-              image: ghcr.io/meirongdev/readlist:v0.1.0
+              image: ghcr.io/meirongdev/readlist:v0.3.0
               command: ["readlist", "snapshot"]
               envFrom: [{ configMapRef: { name: readlist-config } }]
               resources:
@@ -228,7 +228,7 @@ spec:
             fsGroup: 65532
           containers:
             - name: ingest
-              image: ghcr.io/meirongdev/readlist:v0.1.0
+              image: ghcr.io/meirongdev/readlist:v0.3.0
               command: ["readlist", "ingest"]
               envFrom: [{ configMapRef: { name: readlist-config } }]
               env:
@@ -273,7 +273,7 @@ spec:
             fsGroup: 65532
           containers:
             - name: score
-              image: ghcr.io/meirongdev/readlist:v0.1.0
+              image: ghcr.io/meirongdev/readlist:v0.3.0
               command: ["readlist", "score"]
               envFrom: [{ configMapRef: { name: readlist-config } }]
               resources:
