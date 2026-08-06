@@ -143,7 +143,7 @@ TBS      = (Σ_{i ∈ 可用} w_i · score_i) / coverage
 ```
 
 - `coverage` 直接进 UI：**「按 5 / 7 维评出」比「78.3 分」诚实得多**；
-- `coverage < min_coverage` → 不进这份书单（但仍进全库目录，标注缺哪几维）；
+- `coverage < min_coverage` → 不进这份书单（但只要上了别的榜，就仍出现在上榜书目里，标注缺哪几维）；
 - 于是一本 pubdate 被污染的 O'Reilly 经典**可以正常进 `timeless`** —— 因为那份榜不需要 F。
   477 本被误杀的书回来了（review B1）。
 
@@ -370,17 +370,31 @@ internal/
 | `GET /api/lists` | 公开书单清单（不含 `visibility: internal`） |
 | `GET /api/lists/{id}` | 已选材的书单：排名、TBS、coverage、理由串、阅读状态徽章 |
 | `GET /api/works/{id}` | 得分拆解：每维 raw / pct / score / state / source / confidence + 版次列表 |
-| `GET /api/matrix/{run_id}.json` | **滑块用的整块矩阵**：works × dims + facets |
+| `GET /api/catalog` | **上榜书目**：各公开榜去重后的总表，逐本标注缺哪几维 |
 | `GET /metrics` | Prometheus |
 
-`matrix` 是 review M5 的修法，两条硬规则：
+### 公开集合 = 公开榜单的并集
 
-1. **只含可公开行** —— 否则 devtools 里就能看到「不公开」的书，FR-25 的承诺被前端绕过；
-2. 按 `run_id` 寻址 → `Cache-Control: immutable, max-age=31536000`，
-   零后端成本、CDN 友好，发布新 run 自然换 URL。
+本站展示的是**推荐书单与上榜书的元数据**，不是藏书清单。所以公开集合有且只有一个定义：
 
-体量：~1,800 work × 7 维 + facets ≈ 250 KB JSON / **~70 KB gzip**。一次加载，
-之后滑块纯客户端点积（NFR-2 达成，且比原设计的「隐含全量下发」有了明确契约）。
+```
+公开集合 = ⋃ { lists[p] : p ∈ preset, p.visibility = public }   （当前 run）
+```
+
+三条推论，都是硬约束：
+
+1. **不存在全库端点。** 未上榜的书按 id 直接请求 → 404。收窄只画在目录页上是障眼法：
+   `works/{id}` 留着全库可达，等于换个入口把整个书库枚举出去。
+2. **上 internal 榜 ≠ 公开。** `publisher-picks` / `library-hygiene` 是给库主人看的运维视图，
+   它们的行不进公开集合。
+3. **全库计数只在 `/metrics` 上报**（`readlist_works_total`）—— 那是运维视角，不是内容。
+
+实现上这条定义收敛在 `snapshot` 一处：三个内容端点都从同一份快照取数，于是「哪些书算公开」
+只有一份定义。端点各自过滤迟早会漂移出一条泄漏路径 —— review B 的 A3 就是这么来的。
+
+顺带的两个收益：快照从 ~2,000 work 降到百余本，重建便宜一个量级（review B2 的自伤面同步变小）；
+`matrix/{run_id}` 这个「全库 works × dims 整块导出」端点随之删除 —— 它零消费者（review B4），
+留着就是一次请求导出全库。滑块因此维持在**本榜已选出的书内重排**，UI 上明说了这个边界。
 
 ---
 
@@ -419,7 +433,7 @@ internal/
 | **3** | Google Books / OpenLibrary fetch（顺手写 `pubdate` + `pubdate_source`）→ `A` + `F` | 「经典长青」「今年新书」可信 | 2–4 天配额 |
 | **4** | HN → `C`（独立验收：抽 30 本核对命中） | 声量维 | 免费 |
 | **5** | half-life 规则表 + LLM 兜底 + gold 门禁达标 → `D` / `P` | 「最快上手」「深挖原理」 | 本地 GPU |
-| **6** | Web + `matrix` 接口 + 限流 + PVC 备份归属 + 指标 | 公开上线 | 无 |
+| **6** | Web + 上榜书目页 + 限流 + PVC 备份归属 + 指标 | 公开上线 | 无 |
 
 两处与原 roadmap 的实质差异：
 

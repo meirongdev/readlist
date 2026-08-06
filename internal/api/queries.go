@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/meirongdev/readlist/internal/corpus"
@@ -22,17 +23,31 @@ func (s *Server) publishedRun() (runID, version string, err error) {
 	return runID, version, err
 }
 
-// runInfo 返回任意 run 的标准版本;ok=false 表示这个 run 不存在。
-func (s *Server) runInfo(runID string) (version string, ok bool, err error) {
-	err = s.db.SQL().QueryRow(
-		`SELECT COALESCE(standard_version, '') FROM runs WHERE run_id = ?`, runID).Scan(&version)
-	if err == sql.ErrNoRows {
-		return "", false, nil
+// listedWorks 返回「公开集合」的子查询与它的参数。
+//
+// 公开集合 = **公开榜单的并集**,而不是全库。本站展示的是推荐书单与上榜书的元数据;
+// 藏书本身不是内容,不该被逐本枚举出去(全库约 2,000 本,上榜并集约百余本)。
+//
+// 定义收敛在这一处:三个内容端点都从同一个 snapshot 取数,于是「哪些书算公开」
+// 只有一份定义 —— 端点各自过滤迟早会漂移出一条泄漏路径。
+//
+// internal 榜(publisher-picks / library-hygiene)不进这个集合:它们是给库主人看的,
+// 上了 internal 榜不等于对外推荐。
+func (s *Server) listedWorks(runID string) (query string, args []any) {
+	presets := s.publicPresets()
+	if len(presets) == 0 {
+		// `IN ()` 在 SQLite 里是语法错误。没有公开榜 = 公开集合为空,如实返回空集。
+		return `SELECT work_id FROM lists WHERE 0`, nil
 	}
-	if err != nil {
-		return "", false, err
+	args = make([]any, 0, len(presets)+1)
+	args = append(args, runID)
+	ph := make([]string, len(presets))
+	for i, p := range presets {
+		ph[i] = "?"
+		args = append(args, p.ID)
 	}
-	return version, true, nil
+	return `SELECT work_id FROM lists WHERE run_id = ? AND list_id IN (` +
+		strings.Join(ph, ",") + `)`, args
 }
 
 // workBase 书的基本信息(works + editions 聚合)。
@@ -86,7 +101,7 @@ func readStatusRank(status string) int {
 	}
 }
 
-// snapshot 一个 run 的只读视图。
+// snapshot 一个 run 的只读视图,**只含上榜 work**(见 listedWorks)。
 //
 // 四个内容 handler 此前各自重复拉同样的四张表、各自把错误丢进 `_`,DB 出问题时
 // 表现为静默 200 + 空数据。收敛成一个入口后,错误只需在一处处理。
@@ -116,8 +131,9 @@ func (s *Server) snapshot(runID, version string) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 只缓存**已发布**的那个 run。matrix 可以按任意历史 run 寻址,若也进这个单槽缓存,
-	// 交替请求两个 run 就能让每一个请求都重建一遍 —— 把缓存变成放大器。
+	// 只缓存**已发布**的那个 run。当下所有 handler 都只请求已发布 run,这道判断是
+	// 防回归的:一旦哪天又出现按任意 run 寻址的端点,交替请求两个 run 就能让每个请求
+	// 都重建一遍单槽缓存 —— 把缓存变成放大器。
 	if published, _, err := s.publishedRun(); err == nil && published == runID {
 		s.mu.Lock()
 		s.cached = snap
@@ -129,7 +145,7 @@ func (s *Server) snapshot(runID, version string) (*snapshot, error) {
 func (s *Server) buildSnapshot(runID, version string) (*snapshot, error) {
 	snap := &snapshot{RunID: runID, Version: version}
 	var err error
-	if snap.Bases, snap.Editions, err = s.loadWorkBases(); err != nil {
+	if snap.Bases, snap.Editions, err = s.loadWorkBases(runID); err != nil {
 		return nil, err
 	}
 	if snap.Dims, err = s.loadDims(runID); err != nil {
@@ -142,19 +158,21 @@ func (s *Server) buildSnapshot(runID, version string) (*snapshot, error) {
 	return snap, nil
 }
 
-// loadWorkBases 加载全部 work 聚合信息(work_id → base)。
+// loadWorkBases 加载**上榜** work 的聚合信息(work_id → base)。
 //
 // 出版社与格式走 corpus 里那份唯一实现(与评分引擎同一套「取最优」规则):
 // 之前展示层用"第一行的值"、引擎用"最优 tier/格式",于是详情页展示的出版社
 // 可能不是打分用的那个。
-func (s *Server) loadWorkBases() (map[string]workBase, map[string][]editionRow, error) {
+func (s *Server) loadWorkBases(runID string) (map[string]workBase, map[string][]editionRow, error) {
+	listed, args := s.listedWorks(runID)
 	rows, err := s.db.SQL().Query(`SELECT w.work_id, w.canonical_title, w.first_author,
 			w.primary_topic, w.level,
 			e.book_id, e.title, e.publisher_norm, e.format, e.language, e.has_cover,
 			e.has_comments, e.pubdate, e.pubdate_source, e.isbn13, e.google_volume_id,
 			e.personal_rating_stars
 		FROM works w JOIN editions e ON e.work_id = w.work_id
-		ORDER BY w.work_id, e.book_id`)
+		WHERE w.work_id IN (`+listed+`)
+		ORDER BY w.work_id, e.book_id`, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -223,14 +241,18 @@ func parsePubdate(v sql.NullString) (time.Time, bool) {
 	return t, err == nil
 }
 
-// loadDims 加载 run 的全部 dim_scores(work_id → dim → DimScore)。
+// loadDims 加载 run 里**上榜** work 的 dim_scores(work_id → dim → DimScore)。
 func (s *Server) loadDims(runID string) (map[string]map[string]score.DimScore, error) {
 	out := map[string]map[string]score.DimScore{}
 	if runID == "" {
 		return out, nil
 	}
+	listed, listedArgs := s.listedWorks(runID)
+	// 占位符按文本顺序绑定:外层的 run_id 在子查询之前,所以它排在参数首位。
+	args := append([]any{runID}, listedArgs...)
 	rows, err := s.db.SQL().Query(`SELECT work_id, dim, raw, pct, score, state, source, confidence
-		FROM dim_scores WHERE run_id = ? ORDER BY work_id, dim`, runID)
+		FROM dim_scores WHERE run_id = ? AND work_id IN (`+listed+`)
+		ORDER BY work_id, dim`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +316,10 @@ func (s *Server) gradesForRun(runID string) (map[string]string, error) {
 
 // readingByWork 阅读状态,按 book_id join 后挂到 work 上(system-design §4)。
 // EXPOSE_READ_STATUS=false 时直接返回空 —— 这个开关此前只在 /meta 里回显,
-// 而 lists/works/matrix 照旧无条件输出阅读状态与个人评分。
+// 而各内容端点照旧无条件输出阅读状态与个人评分。
+//
+// 入参 editions 已经只含上榜书,所以 join 不上的行有两类:未上榜的书(绝大多数,
+// 正常),以及真正的 book id 漂移。两类都丢掉。
 func (s *Server) readingByWork(editions map[string][]editionRow) (map[string]readingInfo, error) {
 	out := map[string]readingInfo{}
 	if !s.exposeRead {
@@ -320,7 +345,7 @@ func (s *Server) readingByWork(editions map[string][]editionRow) (map[string]rea
 		}
 		wid, ok := bookToWork[bookID]
 		if !ok {
-			continue // 孤儿行(book id 漂移),丢掉 —— NFR-13
+			continue // 未上榜 或 孤儿行(book id 漂移),都丢掉 —— NFR-13
 		}
 		var shelves []string
 		_ = json.Unmarshal([]byte(shelvesJSON), &shelves)

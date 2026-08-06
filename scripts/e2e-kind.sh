@@ -23,7 +23,7 @@ K() { kubectl --context "$CTX" -n "$NS" "$@"; }
 # ---- 断言助手 ----
 # 一律「先把内容抓进变量,再判断」,不做 `curl … | grep -q`:grep -q 命中即退出,
 # 上游 curl 收到 EPIPE 非零退出,`set -o pipefail` 就会把成功的断言判成失败
-# ——  响应体越大越容易踩到(matrix 有几十 KB)。
+# ——  响应体越大越容易踩到。
 jexpr()  { printf '%s' "$1" | python3 -c "import json,sys;d=json.load(sys.stdin);print(eval(sys.argv[1]))" "$2"; }
 want()   { [ "$(jexpr "$1" "$2")" = "True" ] || fail "$3"; }
 has()    { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
@@ -135,16 +135,23 @@ want "$W" "bool(d['dims']) and bool(d['standard_version']) and 'editions' in d" 
 want "$W" "all(v.startswith('https://') and ' ' not in v for v in d['links'].values())" \
   "work 外链未转义或不是 https"
 
-say "检查 /api/v1/catalog:收录全库并逐本标注缺失维度"
+MET=$(GET /metrics)
+
+say "检查 /api/v1/catalog:只收上榜并集,且逐本标注缺失维度"
 C=$(GET /api/v1/catalog)
 want "$C" "d['total']>=1"                  "catalog 为空"
 want "$C" "d['total']==len(d['works'])"    "catalog total 与行数不符"
+# 公开面 = 推荐书单 + 上榜书的元数据,不是全库目录。全库计数只在指标端点上报
+# (运维视角),公开内容必须严格少于它。
+WORKS_TOTAL=$(printf '%s' "$MET" | awk '$1=="readlist_works_total"{print $2}')
+[ -n "$WORKS_TOTAL" ] || fail "metrics 缺 readlist_works_total,无从判断 catalog 是否收了全库"
+want "$C" "d['total'] < $WORKS_TOTAL" \
+  "catalog 收录了全库 $WORKS_TOTAL 本(收窄到上榜并集的改动没生效?)"
 # 缺维度的书不该被静默剔除,而该带着「缺哪几维」出现在目录里(system-design §2)。
 want "$C" "any(x.get('missing') for x in d['works'])" \
   "没有任何一本书被标注缺失维度(D 级书是不是又被过滤掉了?)"
 
 say "检查 /metrics 指标"
-MET=$(GET /metrics)
 for m in readlist_works_total readlist_grade_counts readlist_lists_total \
          readlist_runs_retained readlist_last_score_unix; do
   has "$MET" "$m" || fail "metrics 缺 $m"
@@ -166,14 +173,9 @@ code=$(CODE -H "If-None-Match: $ETAG" "$BASE/api/v1/lists/timeless")
 say "检查存活探针:必须不碰数据库(否则高负载时 kubelet 会杀掉唯一副本)"
 [ "$(CODE "$BASE/livez")" = "200" ] || fail "/livez 不可达"
 
-say "检查 matrix:真实 run 可访问且长缓存,未知 run 必须 404"
-MX=$(GET "/api/v1/matrix/$RUN")
-want "$MX" "len(d['works'])>=1" "matrix 为空"
-# -D - + -o /dev/null:只取响应头,且让 curl 把响应体读完(不制造 EPIPE)。
-MXH=$(curl -s -D - -o /dev/null "$BASE/api/v1/matrix/$RUN")
-has "$MXH" "public, max-age=31536000, immutable" || fail "matrix 缺 immutable 缓存头"
-[ "$(CODE "$BASE/api/v1/matrix/no-such-run")" = "404" ] \
-  || fail "未知 run 应 404,否则空矩阵会被永久缓存"
+say "检查 matrix 已下线:它是全库 works × dims 的整块导出"
+[ "$(CODE "$BASE/api/v1/matrix/$RUN")" = "404" ] \
+  || fail "matrix 端点还在 —— 它一次就能把全库导出去,收窄目录页等于白做"
 
 say "检查零写接口:POST/PUT/DELETE 一律 405"
 for verb in POST PUT DELETE; do

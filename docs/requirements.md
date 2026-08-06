@@ -104,7 +104,7 @@
 | FR-22 | 归一化用**语料内百分位**，不用 min-max | P0 |
 | FR-23 | 时效维度按**主题半衰期**指数衰减，不用绝对年龄 | P0 |
 | FR-24 | 馆藏可读性维度（纯本地，100% 可算），并可反向输出"待补元数据"清单 | P1 |
-| FR-25 | **逐维**记录证据状态（`measured`/`shrunk`/`unknown`）。榜单准入 = preset 的 `needs` + `min_coverage`；A/B/C/D 只作展示徽章，**不作准入闸门**。覆盖不足的书仍进全库目录并逐本标注缺哪几维（见 [scoring-standard.md §5](scoring-standard.md)） | P0 |
+| FR-25 | **逐维**记录证据状态（`measured`/`shrunk`/`unknown`）。榜单准入 = preset 的 `needs` + `min_coverage`；A/B/C/D 只作展示徽章，**不作准入闸门**。某维覆盖不足只挡住需要该维的榜，不影响它进别的榜，上榜后逐本标注缺哪几维（见 [scoring-standard.md §5](scoring-standard.md)） | P0 |
 | FR-26 | 每行分数带 `standard_version`；改公式或权重 = 发新版本，**不得原地覆盖历史分** | P0 |
 | FR-27 | 缺数据一律走贝叶斯收缩到语料先验，**不得当 0 分处理** | P0 |
 
@@ -141,7 +141,8 @@
 |----|------|--------|
 | FR-50 | 榜单页：预设切换 + 权重滑块 + 阅读状态徽章与筛选 | P0 |
 | FR-51 | 书详情页：得分拆解 + 外部链接（出版社 / Google Books）+ 阅读状态 | P0 |
-| FR-52 | 全库目录页：含 C 级书，显式标注"数据不足" | P1 |
+| FR-52 | 上榜书目页：各公开榜去重后的总表，含 C 级书并显式标注"数据不足" | P1 |
+| FR-52b | **公开面 = 公开榜单的并集**。不存在全库端点；未上榜的书按 id 直接请求返回 404；上 internal 榜不等于公开。全库计数只在 `/metrics` 上报 | P0 |
 | FR-53 | 只读 API（榜单 / 书详情 / 预设列表），无任何写接口 | P0 |
 | FR-54 | 封面图**外链** OpenLibrary Covers / Google Books，不自托管出版商封面 | P0 |
 | FR-55 | 移动端可用（榜单是长列表，手机是主要浏览场景） | P1 |
@@ -189,7 +190,7 @@
 | AC-P0 | 阅读状态补录 | 三个书架已建；54 本候选池逐本处理完；已读的书补了个人星级 |
 | AC-P1 | 元数据修复 | 每本书都有 `pubdate_source`；能报出 `mtime-fallback` 剩余数量；出版社归一表覆盖 Top 20 出版社 |
 | AC-P2 | 离线打分 | ① `timeless` 榜前 20 名经**人工逐本核对**无明显误入；② `to-read-next` 能出结果；③ 抽 30 本核对 HN 提及命中的确是这本书；④ 同版本重跑分数逐位一致 |
-| AC-P3 | Web 上线 | 公开可访问；每本书能展开得分拆解；阅读状态徽章与筛选可用；限流已生效；覆盖不足的书在目录页标注"数据不足"并说明**缺哪几维**（而不是被剔除，也不是把 `unknown` 显示成 0 分） |
+| AC-P3 | Web 上线 | 公开可访问；每本书能展开得分拆解；阅读状态徽章与筛选可用；限流已生效；**公开面只有上榜书**（抽一本未上榜的书，按 id 直接请求得 404）；上榜书中覆盖不足的那些在书目页标注"数据不足"并说明**缺哪几维**（而不是被剔除，也不是把 `unknown` 显示成 0 分） |
 | AC-P4 | 收尾 | 指标进监控；标准文档定版；新 PVC 已在夜备名单里 |
 
 **AC-P2 ① 是硬门槛**：榜首若出现明显不该在的书，**回头改公式，不许靠调权重糊过去**
@@ -232,7 +233,7 @@
 
 | # | 问题 | 倾向 |
 |---|------|------|
-| 1 | 公开范围只发 A/B 级（约 700–900 本），还是也放 C 级目录页？ | 放目录页，但默认榜单不含 C |
+| 1 | ~~公开范围只发 A/B 级（约 700–900 本），还是也放 C 级目录页？~~ **已定**：两者都不是 —— 公开面 = 公开榜单的并集（约百余本），全库不公开；证据等级只做徽章，不决定公开范围 | 已定，见 FR-52b |
 | 2 | 中文书（20 本）单独小榜还是并入主榜？外部数据源对中文技术书覆盖差异很大 | 单独小榜 |
 | 3 | 个人笔记数要不要作为信号接入？"做过笔记"比"标了已读"强得多 | 先量一下能对上多少本再定 |
 | 4 | 镜像更新用可变 tag + 手工重启，还是配 image-updater 写回 digest？ | 后者更规范，但属独立议题，不塞进本项目首版 |
@@ -251,7 +252,7 @@
 | 评分 | FR-20 ~ FR-27 | [bdd/scoring.feature](bdd/scoring.feature) | AC-P1, AC-P2 |
 | 榜单 | FR-30 ~ FR-35 | [bdd/ranking.feature](bdd/ranking.feature) | AC-P2, AC-P3 |
 | 阅读状态 | FR-40 ~ FR-46 | [bdd/reading-status.feature](bdd/reading-status.feature) | AC-P0, AC-P3 |
-| 全库目录 | FR-25, FR-33, FR-52 | [bdd/catalog.feature](bdd/catalog.feature) | AC-P3 |
+| 上榜书目 | FR-25, FR-33, FR-52, FR-52b | [bdd/catalog.feature](bdd/catalog.feature) | AC-P3 |
 | 书详情 | FR-34, FR-45, FR-51, FR-54 | [bdd/book-detail.feature](bdd/book-detail.feature) | AC-P3 |
 | Web 界面 | FR-50 ~ FR-55 | ranking / book-detail / catalog | AC-P3 |
 | 只读 API | FR-53 | [bdd/api.feature](bdd/api.feature) | AC-P3 |

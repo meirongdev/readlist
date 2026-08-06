@@ -19,11 +19,13 @@ type Server struct {
 
 	// 已发布 run 的快照缓存。内容按 run 不可变,而 run 每夜才换一次。
 	//
-	// 没有它,每个内容请求都要重新拉 works+editions(约 2.5 千行)+ dim_scores
-	// (约 1.4 万行)+ reading,而连接池只有一条连接 → 一阵爬虫就能让请求排队,
-	// 让同样查库的 /healthz 超过 livenessProbe 的默认 1 秒超时,于是 kubelet
-	// 在高负载时杀掉唯一副本(review B2)。限流挡不住这种自伤:阈值之下的正常流量
-	// 就足够触发。
+	// 没有它,每个内容请求都要重新拉 works+editions+dim_scores+reading,而连接池
+	// 只有一条连接 → 一阵爬虫就能让请求排队,让同样查库的 /healthz 超过
+	// livenessProbe 的默认 1 秒超时,于是 kubelet 在高负载时杀掉唯一副本
+	// (review B2)。限流挡不住这种自伤:阈值之下的正常流量就足够触发。
+	//
+	// 快照收窄到上榜并集之后每次重建便宜了一个量级,但便宜不等于免费 —— 单连接下
+	// 仍是串行的,缓存照留。
 	mu     sync.RWMutex
 	cached *snapshot
 }
@@ -43,7 +45,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/lists", s.handleLists)
 	mux.HandleFunc("GET /api/v1/lists/{id}", s.handleList)
 	mux.HandleFunc("GET /api/v1/works/{id}", s.handleWork)
-	mux.HandleFunc("GET /api/v1/matrix/{run}", s.handleMatrix)
 	mux.HandleFunc("GET /api/v1/catalog", s.handleCatalog)
 	// /api/ 兜底:未知资源 404;非 GET 一律 405(零写接口)。
 	mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

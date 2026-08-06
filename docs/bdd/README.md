@@ -14,7 +14,7 @@
 | [ranking.feature](ranking.feature) | 榜单：预设切换、权重滑块、过滤、豁免、C 级不上榜 | FR-30~35, FR-40, FR-42, AC-P2/AC-P3 |
 | [book-detail.feature](book-detail.feature) | 书详情：得分拆解、数据来源、封面外链 | FR-34, FR-45, FR-51, FR-54, NFR-11/12 |
 | [reading-status.feature](reading-status.feature) | 阅读状态：徽章、筛选、只读镜像、公开性 | FR-40~46, NFR-13/15, AC-P0 |
-| [catalog.feature](catalog.feature) | 全库目录：C 级标注、D 级不公开 | FR-25, FR-52, FR-33, 开放问题 Q2 |
+| [catalog.feature](catalog.feature) | 上榜书目：公开面 = 公开榜并集、缺维度标注 | FR-25, FR-52, FR-52b, FR-33, 开放问题 Q2 |
 | [scoring.feature](scoring.feature) | 评分行为：复算一致、缺数据收缩、来源可信度 | FR-20~27, NFR-10, AC-P1/AC-P2 |
 | [ingestion.feature](ingestion.feature) | 数据接入：快照、最小导出、缓存、配额、归一 | FR-10~17, NFR-9/13/16, AC-P1 |
 | [api.feature](api.feature) | 只读 API 与边缘限流、降级 | FR-53, NFR-4/14, AC-P3 |

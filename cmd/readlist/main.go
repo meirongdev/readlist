@@ -58,7 +58,7 @@ func run() error {
 		// initContainer 用(distroless 无 shell):建库 + 保证有一份可服务的榜单。
 		//
 		// 幂等 —— 只在尚未发布任何 run 时才打分。无条件重打分会让每次 Pod 重启都
-		// 产出一个新 run_id:matrix 的 immutable 缓存全部失效,而 serve 本身早就有
+		// 产出一个新 run_id:ETag 全部失效、读者被迫重下全部内容,而 serve 本身早就有
 		// 「无已发布 run 才自愈打分」的逻辑,这里再打一遍是纯粹的重复。
 		if _, err := corpus.Seed(db); err != nil {
 			return fmt.Errorf("init seed: %w", err)
@@ -349,8 +349,8 @@ func serve(cfg config.Config, db *store.DB, presets []preset.Preset) error {
 	}
 
 	// 四个超时都要给。公开端点面对的是慢连接与爬虫:少了 WriteTimeout,一个读得
-	// 很慢的客户端就能长期占住 goroutine 与那条 SQLite 连接(matrix 响应有几十 KB);
-	// 少了 IdleTimeout,keep-alive 连接会一直堆积。
+	// 很慢的客户端就能长期占住 goroutine 与那条 SQLite 连接;少了 IdleTimeout,
+	// keep-alive 连接会一直堆积。
 	httpServer := &http.Server{
 		Addr:              cfg.APIListenAddr,
 		Handler:           api.NewServer(db, presets, cfg.ExposeReadStatus).Routes(),

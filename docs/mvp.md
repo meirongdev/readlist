@@ -61,11 +61,12 @@ readlist init      # seed + 首次 score(供 kind initContainer;已发布则跳�
 | 可复现 | 无 map 迭代序依赖 + `work_id` 并列打破键 + 每个 run 落真实 `corpus_id`/`facts_hash` |
 | 原子发布 | `published_run` 单行指针;`lists`/`dim_scores`/`norm_cdf` 按 run 存;发布同事务里回收超出 `KEEP_RUNS` 的旧 run |
 | 配置校验 | `presets.yaml` 加载即校验(权重和为 1、`bands ⊆ weights`、维度名与状态合法……),写错则启动失败 |
-| 只读 API | `GET /api/v1/lists` `{id}` `works/{id}` `matrix/{run}` `catalog` `/metrics` `/healthz` `/livez`;非 GET 一律 405;未知 run 404 |
+| 只读 API | `GET /api/v1/lists` `{id}` `works/{id}` `catalog` `/metrics` `/healthz` `/livez`;非 GET 一律 405 |
+| 公开面 | **= 公开榜单的并集**,不是全库:未上榜的书按 id 请求 404;上 internal 榜不等于公开;全库计数只在 `/metrics` 上报 |
 | 缓存 | 快照按 `published_run` 在进程内缓存;内容端点带 `ETag: run_id` 并处理 `If-None-Match`(304);静态资源用内容指纹做 ETag |
 | 探针 | `/healthz` 查库(readiness)、`/livez` 不碰库(liveness)—— 数据库慢是「别收流量」,不是「重启我」 |
 | 人工干预 | `overrides` 的 `veto` / `pin` 在选材层生效(pin 绕过全部准入,理由串写明「人工置顶」);`mention_overrides` 逐条否决 HN 误匹配 |
-| 前端 | 内嵌 SPA:预设切换 + 权重滑块(纯客户端点积/band/coverage 重排,与后端公式逐位一致)+ 阅读徽章 + 目录页逐本标注缺哪几维 |
+| 前端 | 内嵌 SPA:预设切换 + 权重滑块(纯客户端点积/band/coverage 重排,与后端公式逐位一致)+ 阅读徽章 + 上榜书目页逐本标注缺哪几维 |
 | 阅读状态 | 只读镜像,facet 不进分;受 `EXPOSE_READ_STATUS` 控制;`to-read-next` / `read-and-loved` 由它派生 |
 
 ## 4. 演示语料
@@ -104,9 +105,10 @@ make e2e            # 等价于 ./scripts/e2e-kind.sh
 - `timeless` 榜:有内容、TBS 为正、带理由串、coverage 达门槛;
   **且含至少一本 F 为 unknown 的书** —— 该榜不使用时效维度,证据字母不该当闸门(review B1 回归)
 - `/api/v1/works/{id}`:得分拆解 + standard_version + 版次 + 外链为已转义的 https
-- `/api/v1/catalog`:收录全库,且至少有一本被标注缺失维度(不静默剔除)
+- `/api/v1/catalog`:**只收上榜并集**(条目数严格小于 `/metrics` 的 `readlist_works_total`),
+  且至少有一本被标注缺失维度(不静默剔除)
 - `/metrics`:Prometheus 指标(等级计数 / 保留 run 数 / last_score)
-- `matrix/{run}`:真实 run 可访问且带 immutable 缓存头;**未知 run 必须 404**(否则空矩阵被永久缓存)
+- `matrix/{run}`:**已下线**,请求任何 run 都必须 404 —— 它是全库 works × dims 的整块导出
 - 零写接口:POST/PUT/DELETE 一律 405
 - `read-and-loved` 有内容;SPA 首页可访问
 - SPA 客户端重排与后端公式逐位一致(有 node 时执行 `scripts/spa-parity.js`)

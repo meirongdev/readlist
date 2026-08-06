@@ -131,9 +131,32 @@ func TestListItemsSatisfyNeedsAndCoverage(t *testing.T) {
 	}
 }
 
-func TestCatalogCoversWholeLibraryAndAnnotatesMissing(t *testing.T) {
-	// 目录页此前按 grade 过滤掉 D 级 → 出版日期来自 mtime 兜底的书从整站消失。
-	// 现在收全库,逐本标注缺哪几维(review B1 / system-design §2)。
+// publicUnion 直接从库里算「公开集合」= 公开榜单的并集。
+// 故意不复用被测的 listedWorks:两边同一个实现,断言就成了自证。
+func publicUnion(t *testing.T, s *Server) map[string]bool {
+	t.Helper()
+	runID, _, err := s.publishedRun()
+	require.NoError(t, err)
+	require.NotEmpty(t, runID)
+	ids := map[string]bool{}
+	for _, p := range s.publicPresets() {
+		rows, err := s.db.SQL().Query(
+			`SELECT work_id FROM lists WHERE run_id=? AND list_id=?`, runID, p.ID)
+		require.NoError(t, err)
+		for rows.Next() {
+			var w string
+			require.NoError(t, rows.Scan(&w))
+			ids[w] = true
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+	}
+	return ids
+}
+
+func TestCatalogIsListedUnionNotWholeLibrary(t *testing.T) {
+	// 本站展示的是推荐书单与上榜书的元数据。目录页此前收录全库,等于把整个私人
+	// 书库逐本枚举出去 —— 那不是内容。现在行集合 = 公开榜单的并集。
 	s := newTestServer(t, true)
 	m := getJSON(t, doReq(t, s, http.MethodGet, "/api/v1/catalog"))
 	works := m["works"].([]any)
@@ -141,9 +164,24 @@ func TestCatalogCoversWholeLibraryAndAnnotatesMissing(t *testing.T) {
 
 	var total int
 	require.NoError(t, s.db.SQL().QueryRow(`SELECT COUNT(*) FROM works`).Scan(&total))
-	require.Equal(t, total, len(works), "目录必须收录全库")
-	require.Equal(t, float64(total), m["total"].(float64))
+	listed := publicUnion(t, s)
+	require.Len(t, works, len(listed), "目录必须正好是公开榜单的并集")
+	require.Equal(t, float64(len(listed)), m["total"].(float64))
+	require.Less(t, len(listed), total,
+		"演示语料里上榜并集必须真的小于全库,否则这条断言分不出「并集」和「全库」")
 
+	for _, raw := range works {
+		w := raw.(map[string]any)
+		require.True(t, listed[w["work_id"].(string)], "%v 未上任何公开榜却出现在目录里", w["work_id"])
+	}
+}
+
+func TestCatalogAnnotatesMissingDimsInsteadOfDroppingRows(t *testing.T) {
+	// 目录页此前还按 grade 过滤掉 D 级 → 出版日期来自 mtime 兜底的书从整站消失。
+	// 收窄到上榜并集**不能**顺手把这条也改回去:上了榜就该出现,缺哪几维如实标注
+	// (review B1 / system-design §2)。
+	s := newTestServer(t, true)
+	works := getJSON(t, doReq(t, s, http.MethodGet, "/api/v1/catalog"))["works"].([]any)
 	var sawAnnotated bool
 	for _, raw := range works {
 		w := raw.(map[string]any)
@@ -153,6 +191,54 @@ func TestCatalogCoversWholeLibraryAndAnnotatesMissing(t *testing.T) {
 		}
 	}
 	require.True(t, sawAnnotated, "缺维度的书必须被标注出来,而不是被静默剔除")
+}
+
+func TestUnlistedWorksAreNotPublic(t *testing.T) {
+	// 「不展示全量 catalog」必须是整个公开面的性质,不能只是目录页少画几行:
+	// 未上榜的书按 id 直接请求也得 404,否则收窄只是障眼法。
+	s := newTestServer(t, true)
+	listed := publicUnion(t, s)
+
+	pick := func(query string, args ...any) string {
+		t.Helper()
+		rows, err := s.db.SQL().Query(query, args...)
+		require.NoError(t, err)
+		defer rows.Close()
+		for rows.Next() {
+			var w string
+			require.NoError(t, rows.Scan(&w))
+			if !listed[w] {
+				return w
+			}
+		}
+		require.NoError(t, rows.Err())
+		return ""
+	}
+
+	unlisted := pick(`SELECT work_id FROM works ORDER BY work_id`)
+	require.NotEmpty(t, unlisted, "演示语料里必须有未上榜的书,否则这条断言验不到东西")
+	require.Equal(t, http.StatusNotFound, doReq(t, s, http.MethodGet, workPath(unlisted)).Code,
+		"未上榜的书不该能按 id 拉到")
+
+	// 上了 internal 榜不等于对外推荐:那些榜是给库主人看的。
+	runID, _, err := s.publishedRun()
+	require.NoError(t, err)
+	internalOnly := pick(
+		`SELECT work_id FROM lists WHERE run_id=? AND list_id='library-hygiene' ORDER BY work_id`, runID)
+	if internalOnly != "" {
+		require.Equal(t, http.StatusNotFound, doReq(t, s, http.MethodGet, workPath(internalOnly)).Code,
+			"只上了 internal 榜的书不该进公开面")
+	}
+}
+
+func TestMatrixEndpointIsGone(t *testing.T) {
+	// matrix 是「全库 works × dims」的整块导出,且零消费者(review B4)。
+	// 留着它,收窄目录页就等于没做。
+	s := newTestServer(t, true)
+	run := getJSON(t, doReq(t, s, http.MethodGet, "/api/v1/meta"))["run_id"].(string)
+	rr := doReq(t, s, http.MethodGet, "/api/v1/matrix/"+url.PathEscape(run))
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Empty(t, rr.Header().Get("Cache-Control"), "404 绝不能带长缓存")
 }
 
 func TestCatalogOrderIsStable(t *testing.T) {
@@ -211,42 +297,10 @@ func TestWorkLinksAreWellFormed(t *testing.T) {
 	}
 }
 
-// ---------- matrix ----------
-
-func TestMatrixRejectsUnknownRun(t *testing.T) {
-	// 之前任意 run_id(包括不存在的)都返回 200 + immutable,一条拼错的 URL
-	// 会被永久缓存成空矩阵。
-	s := newTestServer(t, true)
-	rr := doReq(t, s, http.MethodGet, "/api/v1/matrix/no-such-run")
-	require.Equal(t, http.StatusNotFound, rr.Code)
-	require.Empty(t, rr.Header().Get("Cache-Control"), "404 绝不能带长缓存")
-}
-
-func TestMatrixServesPublishedRunImmutable(t *testing.T) {
-	s := newTestServer(t, true)
-	meta := getJSON(t, doReq(t, s, http.MethodGet, "/api/v1/meta"))
-	run := meta["run_id"].(string)
-
-	rr := doReq(t, s, http.MethodGet, "/api/v1/matrix/"+url.PathEscape(run))
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Equal(t, "public, max-age=31536000, immutable", rr.Header().Get("Cache-Control"))
-
-	var m map[string]any
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &m))
-	matrix := m["works"].([]any)
-
-	// matrix 与 catalog 的可见集合必须相同,否则「哪些书算公开」有两份定义。
-	cat := getJSON(t, doReq(t, s, http.MethodGet, "/api/v1/catalog"))
-	require.Equal(t, len(cat["works"].([]any)), len(matrix))
-	for _, raw := range matrix {
-		require.NotEmpty(t, raw.(map[string]any)["dims"], "滑块需要逐维得分")
-	}
-}
-
 // ---------- 开关与只读契约 ----------
 
 func TestExposeReadStatusFalseHidesReadingAndRatings(t *testing.T) {
-	// 这个开关此前只在 /meta 回显,lists/works/matrix 照旧无条件输出阅读状态。
+	// 这个开关此前只在 /meta 回显,各内容端点照旧无条件输出阅读状态。
 	off := newTestServer(t, false)
 	require.Equal(t, false, getJSON(t, doReq(t, off, http.MethodGet, "/api/v1/meta"))["expose_read_status"])
 

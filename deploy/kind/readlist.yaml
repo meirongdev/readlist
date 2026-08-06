@@ -49,7 +49,7 @@ spec:
       initContainers:
         # 建库 + 保证有一份可服务的榜单;distroless 无 shell,直接调用 readlist init。
         # `init` 是幂等的:已发布过 run 就跳过打分。无条件重打分会让每次 Pod 重启
-        # 都换一个 run_id,matrix 的 immutable 缓存随之全部失效。
+        # 都换一个 run_id,内容 ETag 随之全部失效。
         - name: init-data
           image: readlist:dev
           imagePullPolicy: IfNotPresent

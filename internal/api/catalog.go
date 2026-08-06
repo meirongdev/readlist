@@ -5,7 +5,7 @@ import (
 	"sort"
 )
 
-// catalogRow 目录页的一行。
+// catalogRow 上榜书目的一行。
 type catalogRow struct {
 	WorkID   string   `json:"work_id"`
 	Title    string   `json:"title"`
@@ -18,12 +18,15 @@ type catalogRow struct {
 	Missing  []string `json:"missing,omitempty"`
 }
 
-// handleCatalog 全库目录 —— 收录**全部** work,逐本标注缺哪几维。
+// handleCatalog 上榜书目 —— **公开榜单的并集**,逐本标注缺哪几维。
 //
-// 这里此前按 grade 过滤掉 D 级。那个闸门是 review B1 认定的模型错误:证据是逐维度
-// 产生的,压成一个字母去卡全局准入,会让「出版日期来自 mtime 兜底」的书从整站消失
-// (实测全库 23%)。system-design §2 的处置是:字母降级为徽章,低覆盖的书**仍进
-// 全库目录并标注缺哪几维**,只是进不了那些真正需要该维度的榜单。
+// 这里此前收录全库(约 2,000 本)。那是把「藏书」当成了内容:本站要展示的是推荐
+// 书单和上榜书的元数据,把整个私人书库逐本枚举出去既不是产品意图,也让「哪些书算
+// 公开」多出一个远大于榜单的面。现在行集合 = snapshot 的可见集合 = 上榜并集。
+//
+// 保留的是另一件事:**不按 grade 过滤**。证据是逐维度产生的,压成一个字母去卡准入,
+// 会让「出版日期来自 mtime 兜底」的书从整站消失(review B1,实测全库 23%)。所以
+// 上了榜但某几维没证据的书照样出现在这里,并标注缺哪几维,而不是被静默剔除。
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	snap, ok := s.loadSnapshot(w, r)
 	if !ok {

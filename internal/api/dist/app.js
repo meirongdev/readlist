@@ -234,7 +234,8 @@ async function renderDetail(workId) {
       <a href="${esc(data.links.openlibrary)}" target="_blank" rel="noopener">OpenLibrary</a></p>`;
 }
 
-/* ---- 全库目录:两千行纯列表没法用,筛选全在客户端(数据已经全在手上) ---- */
+/* ---- 上榜书目:各榜并集的一张总表,筛选全在客户端(数据已经全在手上)。
+       注意这里不是全库目录 —— 没上榜的藏书不进公开面。 ---- */
 
 let catalog = null;
 const catFilter = { q: "", topic: "", level: "", missingOnly: false };
@@ -271,9 +272,10 @@ async function renderCatalog() {
   catalog = await api("/api/v1/catalog");
   const uniq = (key) => [...new Set((catalog.works || []).map((w) => w[key]).filter(Boolean))].sort();
 
-  app.innerHTML = `<h1>全库目录（${catalog.total}）</h1>
-    <p class="preset-desc">目录收录全库。缺少关键维度的书会标注「数据不足」——
-      它进不了需要那几维的榜单,但不会从站上消失。</p>
+  app.innerHTML = `<h1>上榜书目（${catalog.total}）</h1>
+    <p class="preset-desc">这里是各份榜单收录的书去重后的总表,不是全库目录 ——
+      没上榜的藏书不在公开面上。缺少关键维度的书会标注「数据不足」:
+      它进不了需要那几维的榜单,但只要上了别的榜就仍会出现在这里。</p>
     <div class="cat-filters">
       <input id="cat-q" type="search" placeholder="搜索书名或作者…" value="${esc(catFilter.q)}">
       <select id="cat-topic"><option value="">全部主题</option>${options(uniq("topic"), catFilter.topic)}</select>
