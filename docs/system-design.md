@@ -23,6 +23,54 @@
 | **judgement** | 维度分 = 事实经公式与语料归一后的 0–100。公式是价值判断，**版本化** | 中（改公式 = 升版） | 库主人 |
 | **selection** | 书单 = 判断 + 逐维准入 + 去重 + 多样性约束 + 截断 + 理由拼装 | 最高（秒级重跑） | preset 配置 |
 
+整条管道一张图（层 = 变更频率与重新计算的边界）：
+
+```mermaid
+flowchart TB
+    subgraph CORPUS["源 · 每夜 CronJob —— 唯一能碰 calibre 卷的容器（无网络出口）"]
+        direction LR
+        MD[("calibre metadata.db<br/>VACUUM INTO 整库快照")] --> SNAP
+        APP[("calibre-web app.db<br/>只导 3 表·阅读状态")] --> SNAP
+        SNAP["snapshot → corpus@C₁"] --> WK["works 聚类<br/>edition → work"]
+    end
+
+    subgraph FACTS["① facts 层 · 由外部世界决定 · 变更最低 / 最贵"]
+        direction LR
+        WK --> GB[Google Books]
+        WK --> OL[OpenLibrary]
+        WK --> HN[HN Algolia]
+        WK --> LLM[LLM 网关]
+        GB --> EV[("evidence<br/>缓存 + TTL · 跨 run 复用")]
+        OL --> EV
+        HN --> EV
+        LLM --> EV
+    end
+
+    subgraph JUDGE["② judgement 层 · 公式 = 价值判断 · 版本化"]
+        EV --> DS["dim_scores<br/>每 (work,dim)：raw / pct / score / 三态"]
+        EV --> CDF["norm_cdf<br/>只由 measured 构建的经验 CDF"]
+    end
+
+    subgraph SELECT["③ selection 层 · 由 preset 决定 · 毫秒级重跑"]
+        DS --> PRESET{预设权重档案<br/>needs + bands + filters}
+        PRESET --> LISTS["lists<br/>准入 → 去重 → 多样性 → 理由串"]
+    end
+
+    LISTS --> PUB["publish<br/>published_run 原子指针"]
+    PUB --> API["只读 API + 内嵌 SPA · 只读 published_run"]
+```
+
+改变某层时，代价和范围都锁在那一层以内——见下一段收益说明。逐维三态是 **judgement 产出、selection 消费**的跨层契约，细节见 §2（其两条硬语义：`unknown` 直接从权重 renormalize 掉、`coverage` 进 UI）：
+
+```mermaid
+flowchart LR
+    subgraph STA["逐 (work, dim) 证据状态（judgement 产出）"]
+        M[measured<br/>有实测证据] --> C1[参与排序 · 计入 coverage<br/>有判别力 · 用于构建 CDF]
+        S[shrunk<br/>无证据 → 收缩到语料先验] --> C2[参与排序 · 计入 coverage<br/>判别力 0 · 映射到先验位]
+        U[unknown<br/>连收缩都不合理<br/>pubdate 污染 / 作者未知] --> C3[不参与排序<br/>该维从权重中 renormalize<br/>coverage 下降]
+    end
+```
+
 分层的直接收益：换公式只重跑 judgement（秒级）；加榜只重跑 selection（毫秒级，且
 不碰 facts —— 这才真正兑现 FR-30 的「加榜不重算分数」）；facts 是唯一需要外部配额的层，
 它被彻底隔离。
