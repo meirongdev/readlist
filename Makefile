@@ -10,13 +10,11 @@ BIN       := bin/readlist
 IMG       ?= readlist:dev
 PLATFORMS ?= linux/amd64,linux/arm64
 KIND_NAME ?= readlist
-SPA_PORT  ?= 8099
-SPA_TMP   := .tmp-spa
 PIPE_DIR  ?= .tmp-pipeline
 PIPE_DB   ?= $(PIPE_DIR)/readlist.db
 
 .DEFAULT_GOAL := help
-.PHONY: help build run test test-go test-race test-spa fmt fmt-check vet \
+.PHONY: help build run test test-go test-race fmt fmt-check vet \
         check clean docker-build docker-buildx kind-up kind-down kind-load \
         deploy deploy-clean e2e e2e-serve smoke pipeline snapshot
 
@@ -32,26 +30,15 @@ run: build ## 构建并以默认 DB 运行(生产形态:单二进制托管内嵌
 	./$(BIN) serve
 
 # ---- 测试 ----
-test: test-go test-spa ## 跑全部测试(Go + SPA 一致性)
+# SPA 是纯展示层(排名、TBS、覆盖率全部由服务端算好后直接渲染),所以没有
+# 「客户端公式 vs 服务端公式」的一致性需要校验 —— 这里曾经有一个 test-spa 目标,
+# 是权重滑块留下的:滑块把 score.Combine 用 JS 又实现了一遍,只能靠一条跑真服务的
+# parity 测试把两份公式钉在一起。滑块撤掉后,那份重复实现和它的防线一起消失了。
+test: test-go ## 跑全部测试
 test-go: ## Go 测试(离线)
 	$(OFFLINE) $(GO) test $(GOPKGS)
 test-race: ## Go 测试(竞态检测)
 	$(OFFLINE) $(GO) test -race $(GOPKGS)
-
-test-spa: build ## 校验 SPA 客户端重排与后端公式逐位一致(需要 node,缺则跳过)
-	@if ! command -v node >/dev/null 2>&1; then echo "  跳过 test-spa:未安装 node"; exit 0; fi; \
-	rm -rf $(SPA_TMP) && mkdir -p $(SPA_TMP); \
-	DB_PATH=$(SPA_TMP)/spa.db ./$(BIN) seed >/dev/null && \
-	DB_PATH=$(SPA_TMP)/spa.db ./$(BIN) score >/dev/null && \
-	( DB_PATH=$(SPA_TMP)/spa.db API_LISTEN_ADDR=:$(SPA_PORT) ./$(BIN) serve >$(SPA_TMP)/serve.log 2>&1 & \
-	  echo $$! >$(SPA_TMP)/pid ); \
-	for i in 1 2 3 4 5 6 7 8 9 10; do \
-	  curl -sf http://127.0.0.1:$(SPA_PORT)/healthz >/dev/null 2>&1 && break || sleep 0.3; \
-	done; \
-	BASE=http://127.0.0.1:$(SPA_PORT) node scripts/spa-parity.js; rc=$$?; \
-	kill $$(cat $(SPA_TMP)/pid) 2>/dev/null || true; \
-	rm -rf $(SPA_TMP); \
-	exit $$rc
 
 # ---- 格式化 / 静态检查 ----
 fmt: ## Go 格式化(gofmt,会改写文件)
@@ -61,7 +48,7 @@ fmt-check: ## 检查 Go 格式(有未格式化文件则失败)
 	if [ -n "$$out" ]; then echo "以下文件需要 gofmt:"; echo "$$out"; exit 1; fi
 vet: ## go vet
 	$(OFFLINE) $(GO) vet $(GOPKGS)
-check: fmt-check vet test-go test-spa ## 总检查(不改写)
+check: fmt-check vet test-go ## 总检查(不改写)
 
 # ---- 镜像 ----
 # 本地目标必须让镜像真的落到 docker daemon 里 —— 之前 docker-build 用 buildx 跑
@@ -113,4 +100,4 @@ snapshot: build ## 只跑 snapshot(读 calibre 两库 → 真实语料,不联网
 	  SOURCE_APP_DB=$(SOURCE_APP_DB) SNAPSHOT_DIR=$(PIPE_DIR)/snapshot ./$(BIN) snapshot
 
 clean: ## 清理构建产物
-	rm -rf bin $(SPA_TMP) $(PIPE_DIR)
+	rm -rf bin $(PIPE_DIR)

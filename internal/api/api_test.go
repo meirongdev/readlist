@@ -73,9 +73,10 @@ func TestPresetsListExcludesInternal(t *testing.T) {
 	require.False(t, ids["library-hygiene"], "internal 榜不应出现在公开列表")
 }
 
-func TestListsCarryWeightsForClientRescore(t *testing.T) {
-	// 权重滑块要在客户端复算 TBS。这份响应此前只有 {id,name,description,size},
-	// 于是 SPA 拿到的权重表恒为空,每本书都被显示成「0.0 分 · 覆盖 0%」。
+func TestListsCarryWeightProfile(t *testing.T) {
+	// 「榜单 = 权重档案」是对外主张,所以口径必须随榜发出来、并且自洽:
+	// 权重和为 1、band 维度必有权重。这份响应此前只有 {id,name,description,size},
+	// 榜单页就没法把「这个排名按什么算」印给读者。
 	m := getJSON(t, doReq(t, newTestServer(t, true), http.MethodGet, "/api/v1/lists"))
 	var checkedBand bool
 	for _, x := range m["lists"].([]any) {

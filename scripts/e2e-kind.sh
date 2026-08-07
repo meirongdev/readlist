@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # readlist 本地端到端:kind 集群 + 部署 + API 断言。
-# 依赖:docker / kind / kubectl / python3(node 可选,用于 SPA 一致性校验)。
+# 依赖:docker / kind / kubectl / python3。
 set -euo pipefail
 
 KIND_NAME="${KIND_NAME:-readlist}"
@@ -104,12 +104,12 @@ if [ -n "$RUN_BEFORE" ] && [ "$RUN_BEFORE" = "$RUN" ]; then
   fail "CronJob 重算后 run_id 没变($RUN)—— 原子发布没生效"
 fi
 
-say "检查 /api/v1/lists:公开榜不含 internal,且每份榜都带滑块所需口径"
+say "检查 /api/v1/lists:公开榜不含 internal,且每份榜都带完整口径"
 L=$(GET /api/v1/lists)
 IDS="$(jexpr "$L" "' '.join(x['id'] for x in d['lists'])")"
 has "$IDS" "timeless"         || fail "lists 缺 timeless"
 has "$IDS" "library-hygiene"  && fail "internal 榜泄漏到公开列表"
-# 权重滑块的数据契约:缺了 weights,前端会把每本书都算成 0 分,而首页看不出报错。
+# 「榜单 = 权重档案」的对外契约:口径必须随榜发出来,且自洽(和为 1、band ⊆ weights)。
 want "$L" "all(x.get('weights') and abs(sum(x['weights'].values())-1)<1e-6 for x in d['lists'])" \
   "lists 缺 weights 或权重和不为 1"
 want "$L" "all(x.get('order') in ('desc','asc') and 'min_coverage' in x for x in d['lists'])" \
@@ -194,34 +194,6 @@ say "检查 SPA 首页"
 # 报出「context 不存在」这种与真实原因毫无关系的错。
 HOMEPAGE=$(GET /)
 has "$HOMEPAGE" "readlist" || fail "SPA 首页未返回"
-
-if command -v node >/dev/null 2>&1; then
-  # 走 port-forward 而不是上面那个 NodePort 地址,绕开两个与被测代码无关的环境问题:
-  #   1. hostPort 30080 可能已被本机另一个 kind 集群占用,localhost 会打到别人身上;
-  #   2. node 的 fetch(undici)在 Docker 网桥网段上会挑一个无效源地址 → EHOSTUNREACH,
-  #      而同一地址 curl 是通的。
-  PF_PORT="${PF_PORT:-38080}"
-  PF_LOG="$(mktemp -t readlist-pf)"
-  say "校验 SPA 客户端重排与后端公式一致(port-forward :$PF_PORT)"
-  K port-forward svc/readlist "${PF_PORT}:80" >"$PF_LOG" 2>&1 &
-  PF_PID=$!
-  # shellcheck disable=SC2064
-  trap "kill $PF_PID 2>/dev/null || true; rm -f '$PF_LOG'" EXIT
-  for _ in $(seq 1 40); do
-    curl -sf "http://127.0.0.1:${PF_PORT}/healthz" >/dev/null 2>&1 && break
-    kill -0 "$PF_PID" 2>/dev/null || break   # port-forward 已死,不必再等
-    sleep 0.5
-  done
-  if ! curl -sf "http://127.0.0.1:${PF_PORT}/healthz" >/dev/null 2>&1; then
-    say "  port-forward 输出:"; sed 's/^/    /' "$PF_LOG" || true
-    fail "port-forward 未就绪(端口 $PF_PORT 可能被占用,可用 PF_PORT=… 换一个)"
-  fi
-  BASE="http://127.0.0.1:${PF_PORT}" node scripts/spa-parity.js || fail "SPA 与后端评分口径不一致"
-  kill "$PF_PID" 2>/dev/null || true
-  trap - EXIT
-else
-  say "跳过 SPA 一致性校验(未安装 node)"
-fi
 
 echo
 pass "全部断言通过 —— kind 端到端验证成功"

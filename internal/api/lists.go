@@ -9,9 +9,10 @@ import (
 
 // listMeta 一份榜单的口径声明。
 //
-// weights / bands / order / min_coverage 必须发给前端:权重滑块要在客户端复算
-// TBS 与 coverage,而这份响应此前只有 {id,name,description,size} —— 于是 SPA 拿到
-// 的权重表恒为空,rescore() 在 totalW=0 下把每本书都算成「0.0 分 · 覆盖 0%」。
+// 「榜单 = 权重档案」是本站的核心主张,所以 weights / bands / order / min_coverage
+// 必须随榜发出来,让读者能看见这份排名到底按什么算 —— 榜单页会把 weights 直接印在
+// 标题下面。它同时是一份可被外部校验的契约:权重和为 1、band 维度必有权重,
+// e2e 就是照着这几条断言的。
 type listMeta struct {
 	ID          string                 `json:"id"`
 	Name        string                 `json:"name"`

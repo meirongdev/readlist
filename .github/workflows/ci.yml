@@ -20,16 +20,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # make check 里的 test-spa 需要 node:它在真服务上加载真正的 app.js,
-      # 逐本比对客户端与后端算出的 TBS/coverage。缺 node 会静默跳过,
-      # 而这条校验正是权重滑块唯一的回归防线,不能让它在 CI 里被跳过。
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: 确认 node 就位(否则 test-spa 会静默跳过)
-        run: node --version
-
       # 必须显式下载:make 的目标一律带 GOPROXY=off(用来证明构建过程不外联),
       # 而 setup-go 的 cache 只负责恢复/保存缓存、不会拉依赖 —— 缓存为空时
       # (首次运行、go.sum 变更后)GOPROXY=off 会直接报 module lookup disabled。
@@ -39,7 +29,7 @@ jobs:
       - name: 校验依赖完整性
         run: go mod verify
 
-      - name: fmt + vet + go test + spa 一致性
+      - name: fmt + vet + go test
         run: make check
 
       - name: 竞态检测
