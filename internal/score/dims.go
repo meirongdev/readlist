@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/meirongdev/readlist/internal/corpus"
+	"github.com/meirongdev/readlist/internal/preset"
 )
 
 // DimResult 单维原始值与状态。
@@ -146,29 +147,86 @@ func (w *WorkInput) readability() DimResult {
 	return DimResult{Raw: raw, State: StateMeasured, Source: "local-metadata"}
 }
 
-// Grade 证据等级徽章(system-design §2):
-// A=全维 measured,B=有 shrunk 但有外部信号,C=主要靠本地元数据,D=关键维(F/T) unknown。
+// GradedDims 「实际参与排序的维度」= 在任意一份 preset 里占非零权重的维度。
+//
+// 徽章的口径必须从 presets.yaml 推导,不能写死一份维度清单:榜单增删是配置行为
+// (加榜 = 加一段 YAML),写死的清单迟早和实际排序用的维度对不上。这不是假想 ——
+// 旧版 Grade 遍历 AllDims 求「全维 measured」才给 A,而 D / P 两维根本没有生产
+// 数据源(labels 表只有 corpus.Seed 会写),于是 A 级永远不可达、九成以上的书压在
+// 同一个 B 上,一个恒定值占着每本书标题旁边的位置。
+//
+// 用「占权重」而不是「出现在 needs 里」:needs 是准入闸门,不满足的书压根不在这份
+// 榜上,轮不到给它发徽章;真正决定分数由多少证据支撑的是权重。
+func GradedDims(presets []preset.Preset) []Dim {
+	weighted := map[Dim]bool{}
+	for _, p := range presets {
+		for name, w := range p.Weights {
+			if w > 0 {
+				weighted[Dim(name)] = true
+			}
+		}
+	}
+	// 走 AllDims 而不是遍历 map:输出顺序必须稳定(见 AllDims 的注释)。
+	out := make([]Dim, 0, len(weighted))
+	for _, d := range AllDims {
+		if weighted[d] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// externalDims 需要**外部证据**才能 measured 的维度。
+// T(出版社层级 × 作者知名度)与 readability(格式/封面/简介齐全度)只读本地
+// calibre 元数据,它们 measured 说明不了「这本书被本库之外的世界验证过」——
+// 徽章里 B 与 C 的分界正是这件事。
+var externalDims = map[Dim]bool{
+	DimAcclaim: true, DimCommunity: true, DimFreshness: true,
+	DimDepth: true, DimPractical: true,
+}
+
+// Grade 证据等级徽章(system-design §2)。graded 是参与排序的维度集合,由
+// GradedDims 从 preset 推出:
+//
+//	A  graded 维全部 measured
+//	B  有 shrunk,但至少一个 graded 的外部证据维 measured
+//	C  没有任何外部信号,分数基本靠本地元数据撑着
+//	D  有 graded 维为 unknown —— 那一维被整个 renormalize 出这本书的权重,
+//	   也就是说它的分是在**比榜单声明更少的维度**上算出来的
+//
+// 不参与排序的维度不看:F 的证据状态曾经能直接把徽章压到 D,而当前没有任何一份
+// 榜给 F 权重 —— 拿一个不影响排序的维度去给排名结果打分,得到的字母没有含义。
 //
 // ⚠️ 这个字母**只是 UI 徽章,不决定任何准入** —— 榜单准入由 preset 的
 // needs + min_coverage 逐维判定(见 Engine.selectList)。把它当全局闸门用,会让
 // 一本 pubdate 被 mtime 污染的 O'Reilly 经典无法进入「明确声明不关心出版日期」的
 // timeless 榜(review B1,实测影响全库 23%)。
-func Grade(dims map[Dim]DimScore) string {
-	if dims[DimFreshness].State == StateUnknown || dims[DimTrust].State == StateUnknown {
-		return "D"
+func Grade(dims map[Dim]DimScore, graded []Dim) string {
+	if len(graded) == 0 {
+		return "" // 没有任何加权维度 → 无从评级,不编一个字母出来
 	}
-	allMeasured := true
-	for _, d := range AllDims {
-		if dims[d].State != StateMeasured {
+	allMeasured, anyUnknown, extMeasured := true, false, false
+	for _, d := range graded {
+		switch dims[d].State {
+		case StateMeasured:
+			if externalDims[d] {
+				extMeasured = true
+			}
+		case StateShrunk:
 			allMeasured = false
-			break
+		default:
+			// unknown,以及「这一维压根没有记录」—— 后者同样意味着它没进排序。
+			allMeasured, anyUnknown = false, true
 		}
 	}
-	if allMeasured {
+	switch {
+	case anyUnknown:
+		return "D"
+	case allMeasured:
 		return "A"
-	}
-	if dims[DimAcclaim].State == StateMeasured || dims[DimCommunity].State == StateMeasured {
+	case extMeasured:
 		return "B"
+	default:
+		return "C"
 	}
-	return "C"
 }

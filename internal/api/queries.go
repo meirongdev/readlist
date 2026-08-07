@@ -151,7 +151,7 @@ func (s *Server) buildSnapshot(runID, version string) (*snapshot, error) {
 	if snap.Dims, err = s.loadDims(runID); err != nil {
 		return nil, err
 	}
-	snap.Grades = gradesFromDims(snap.Dims)
+	snap.Grades = s.gradesFromDims(snap.Dims)
 	if snap.Reading, err = s.readingByWork(snap.Editions); err != nil {
 		return nil, err
 	}
@@ -274,14 +274,19 @@ func (s *Server) loadDims(runID string) (map[string]map[string]score.DimScore, e
 
 // gradesFromDims 由已加载的维度状态算证据等级徽章,复用 score.Grade 的规则。
 // 之前这里为了拿 state 又把 dim_scores 查了第二遍。
-func gradesFromDims(dims map[string]map[string]score.DimScore) map[string]string {
+//
+// graded 用**全部** preset(含 internal)推,和打分时 Engine.Compute 用的是同一个
+// 集合 —— 徽章不落库、每次读都重算,两边口径必须同源,否则 /metrics 报的字母分布
+// 会和页面上显示的对不上。
+func (s *Server) gradesFromDims(dims map[string]map[string]score.DimScore) map[string]string {
+	graded := score.GradedDims(s.presets)
 	grades := make(map[string]string, len(dims))
 	for wid, byDim := range dims {
 		typed := make(map[score.Dim]score.DimScore, len(byDim))
 		for d, ds := range byDim {
 			typed[score.Dim(d)] = ds
 		}
-		grades[wid] = score.Grade(typed)
+		grades[wid] = score.Grade(typed, graded)
 	}
 	return grades
 }
@@ -311,7 +316,7 @@ func (s *Server) gradesForRun(runID string) (map[string]string, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return gradesFromDims(states), nil
+	return s.gradesFromDims(states), nil
 }
 
 // readingByWork 阅读状态,按 book_id join 后挂到 work 上(system-design §4)。

@@ -20,7 +20,6 @@ type Facts struct {
 	HasHalfLife      bool
 	Depth            float64
 	HasDepth         bool
-	Grade            string
 	Coverage         float64
 	AvailableDims    int
 	TotalDims        int // 该 preset 加权的维度总数

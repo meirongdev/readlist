@@ -119,10 +119,15 @@ func (e *Engine) Compute(presets []preset.Preset) (*Computation, error) {
 	for _, id := range ids {
 		dims[id] = e.normalize(raws[id], cdfs, params)
 	}
-	// 5) 证据等级徽章(仅展示,不做准入 —— 见 Grade 的注释)
+	// 5) 证据等级徽章(仅展示,不做准入 —— 见 Grade 的注释)。
+	//
+	// 徽章看的是**实际参与排序的维度**,所以它的口径随 presets 走,而不是七维全看。
+	// 这个集合是全局的(所有 preset 的加权维并集),不是逐榜的:同一本书在目录页、
+	// 详情页和三份榜上必须是同一个字母,否则读者看到的是三个互相矛盾的评价。
+	graded := GradedDims(presets)
 	grade := map[string]string{}
 	for _, id := range ids {
-		grade[id] = Grade(dims[id])
+		grade[id] = Grade(dims[id], graded)
 	}
 	// 6) selection(含人工 veto / pin)
 	manual, err := e.loadManualLists()
@@ -435,7 +440,6 @@ func (e *Engine) facts(p preset.Preset, w *WorkInput, dims map[Dim]DimScore,
 		AuthorIsUnknown: strings.EqualFold(strings.TrimSpace(w.FirstAuthor), "unknown"),
 		HasHalfLife:     w.HalfLifeYears > 0,
 		HalfLifeYears:   w.HalfLifeYears,
-		Grade:           Grade(dims),
 		Coverage:        cr.Coverage,
 		AvailableDims:   len(cr.Available),
 		TotalDims:       cr.TotalDims,

@@ -144,17 +144,61 @@ func TestNeedsGatesUnweightedDim(t *testing.T) {
 	require.False(t, NeedsSatisfied(dims, Needs{DimTrust: StateShrunk}), "没有该维记录也算不满足")
 }
 
-func TestGradeIsBadgeOnly(t *testing.T) {
-	dims := map[Dim]DimScore{}
-	for _, d := range AllDims {
-		dims[d] = DimScore{State: StateMeasured}
+func TestGradedDimsComesFromWeightsNotAllSevenDims(t *testing.T) {
+	// 徽章的口径 = 实际参与排序的维度。写死七维的老写法让 A 级永远不可达:
+	// D / P 没有生产数据源(labels 只有 seed 会写),恒为 unknown。
+	graded := GradedDims([]preset.Preset{
+		{ID: "x", Weights: map[string]float64{"A": 0.5, "T": 0.5}},
+		{ID: "y", Weights: map[string]float64{"A": 0.7, "readability": 0.3}},
+	})
+	require.Equal(t, []Dim{DimAcclaim, DimTrust, DimReadability}, graded,
+		"= 各 preset 加权维的并集,且顺序跟 AllDims(必须可复现)")
+
+	// 零权重不算「参与排序」——它对分数没有任何影响。
+	require.Empty(t, GradedDims([]preset.Preset{{ID: "z", Weights: map[string]float64{"A": 0}}}))
+
+	// 线上真实配置里 D / P 必须落在集合之外,否则徽章又会退化成恒定值。
+	live := GradedDims(loadPresets(t))
+	require.NotContains(t, live, DimDepth)
+	require.NotContains(t, live, DimPractical)
+}
+
+func TestGradeOnlyLooksAtDimsThatRank(t *testing.T) {
+	graded := []Dim{DimAcclaim, DimCommunity, DimTrust, DimReadability}
+	all := func() map[Dim]DimScore {
+		dims := map[Dim]DimScore{}
+		for _, d := range AllDims {
+			dims[d] = DimScore{State: StateMeasured}
+		}
+		return dims
 	}
+
+	dims := all()
+	require.Equal(t, "A", Grade(dims, graded))
+
+	// 不参与排序的维度 unknown → 徽章不该动。这正是老规则的错处:F 恒能把徽章压到 D,
+	// 而当前没有任何一份榜给 F 权重(review B1 同一个根因的第二次现身)。
 	dims[DimFreshness] = DimScore{State: StateUnknown}
-	require.Equal(t, "D", Grade(dims))
-	dims[DimFreshness] = DimScore{State: StateMeasured}
-	require.Equal(t, "A", Grade(dims))
+	dims[DimDepth] = DimScore{State: StateUnknown}
+	require.Equal(t, "A", Grade(dims, graded))
+
+	// 加权维 shrunk:仍有外部信号(A/C measured)→ B。
+	dims[DimReadability] = DimScore{State: StateShrunk}
+	require.Equal(t, "B", Grade(dims, graded))
+
+	// 外部信号全无,只剩本地元数据 → C。
+	dims[DimAcclaim] = DimScore{State: StateShrunk}
 	dims[DimCommunity] = DimScore{State: StateShrunk}
-	require.Equal(t, "B", Grade(dims))
+	require.Equal(t, "C", Grade(dims, graded))
+
+	// 加权维 unknown:那一维被整个 renormalize 掉,分数是在更少的维度上算出来的 → D。
+	dims[DimTrust] = DimScore{State: StateUnknown}
+	require.Equal(t, "D", Grade(dims, graded))
+
+	// 该维压根没有记录,和 unknown 同等对待 —— 它同样没进排序。
+	require.Equal(t, "D", Grade(map[Dim]DimScore{}, graded))
+	// 没有任何加权维 → 不编一个字母出来。
+	require.Empty(t, Grade(all(), nil))
 }
 
 // ---------- 可复现性(NFR-10)----------
@@ -277,7 +321,11 @@ func TestUntrustedPubdateStillEntersTimeless(t *testing.T) {
 
 	const untrusted = "richardson/restful web apis"
 	require.Equal(t, StateUnknown, res.Dims[untrusted][DimFreshness].State, "前提:该书 F 维应为 unknown")
-	require.Equal(t, "D", res.Grade[untrusted], "前提:该书的字母徽章应为 D")
+	// 徽章同样不该因为 F 而扣分:没有一份榜给 F 权重,它不参与排序。这本书的分完全
+	// 建立在 A/C/T/readability 四个实测维上,所以它就是 A —— 老规则把它打成 D,
+	// 而 D 正是当初被误当成全局闸门、让 477 本书从整站消失的那个字母。
+	require.Equal(t, "A", res.Grade[untrusted],
+		"不参与排序的维度 unknown 不该影响徽章")
 
 	var found bool
 	for _, en := range res.Lists["timeless"] {

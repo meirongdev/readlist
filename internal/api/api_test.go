@@ -287,7 +287,9 @@ func TestWorkUnknownDimsAreLabelledNotScored(t *testing.T) {
 	// 而不是把占位的 0 当成真实得分展示。
 	s := newTestServer(t, true)
 	m := getJSON(t, doReq(t, s, http.MethodGet, workPath("richardson/restful web apis")))
-	require.Equal(t, "D", m["grade"])
+	// 徽章按**参与排序的维度**评(A/C/T/readability 全实测 → A),而缺失的 F 走
+	// missing 逐维如实说明 —— 「缺哪几维」是逐维信息,压不进一个字母里。
+	require.Equal(t, "A", m["grade"])
 	missing := m["missing"].([]any)
 	require.NotEmpty(t, missing)
 	var sawF bool
