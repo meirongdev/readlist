@@ -31,7 +31,7 @@ func (s *Server) publishedRun() (runID, version string, err error) {
 // 定义收敛在这一处:三个内容端点都从同一个 snapshot 取数,于是「哪些书算公开」
 // 只有一份定义 —— 端点各自过滤迟早会漂移出一条泄漏路径。
 //
-// internal 榜(publisher-picks / library-hygiene)不进这个集合:它们是给库主人看的,
+// internal 榜(library-hygiene)不进这个集合:它是给库主人看的,
 // 上了 internal 榜不等于对外推荐。
 func (s *Server) listedWorks(runID string) (query string, args []any) {
 	presets := s.publicPresets()

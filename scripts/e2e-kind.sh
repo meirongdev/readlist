@@ -186,8 +186,8 @@ done
 say "检查 internal 榜不能按 id 直接拉到"
 [ "$(CODE "$BASE/api/v1/lists/library-hygiene")" = "404" ] || fail "internal 榜可被直接请求"
 
-say "检查 read-and-loved 有内容(演示补录个人星级后)"
-want "$(GET /api/v1/lists/read-and-loved)" "len(d['items'])>=1" "read-and-loved 为空"
+say "检查 to-read-next 有内容(高分 ∩ 未读)"
+want "$(GET /api/v1/lists/to-read-next)" "len(d['items'])>=1" "to-read-next 为空"
 
 say "检查 SPA 首页"
 # 变量名别用 HOME —— 覆盖它会让后续的 kubectl 找不到 $HOME/.kube/config,

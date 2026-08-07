@@ -24,29 +24,16 @@ func TestLoadEmbeddedPresetsAreValid(t *testing.T) {
 		}
 		require.InDelta(t, 1.0, sum, weightSumTolerance, "preset %s 权重和不为 1", p.ID)
 
-		// 每个 band 维度都必须占一份权重,否则 band 项系数为 0 = 空操作。
+		// 每个 band 维度都必须**占一份非零权重**,否则 band 项的系数是 0 = 空操作,
+		// 「目标带」这个卖点在公式上根本不成立(review B4:曾有一份榜从落地第一天
+		// 起就是这样,声明了 D 的目标带却没给 D 权重)。
 		for dim := range p.Bands {
-			require.Contains(t, p.Weights, dim, "preset %s 的 band 维度 %s 没有权重", p.ID, dim)
+			require.Greater(t, p.Weights[dim], 0.0,
+				"preset %s 的 band 维度 %s 没有非零权重,band 项系数为 0", p.ID, dim)
 		}
 	}
 	require.True(t, ids["timeless"])
 	require.True(t, ids["library-hygiene"])
-}
-
-func TestShipThisWeekBandActuallyHasCoefficient(t *testing.T) {
-	// 这份榜的卖点是「太深的书不适合速成」。它落地时 bands 声明了 D 却没给 D 权重,
-	// 于是 band 项系数是 0,卖点在公式上根本不成立(review B4)。
-	presets, err := Load()
-	require.NoError(t, err)
-	for _, p := range presets {
-		if p.ID != "ship-this-week" {
-			continue
-		}
-		require.Contains(t, p.Bands, "D")
-		require.Greater(t, p.Weights["D"], 0.0, "D 必须占一份权重,band 才有系数")
-		return
-	}
-	t.Fatal("找不到 ship-this-week 预设")
 }
 
 func base() Preset {

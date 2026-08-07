@@ -90,8 +90,8 @@ func (p Preset) Public() bool { return p.Visibility != "internal" }
 // preset 是「加榜不改代码、不重算分数」的配置面,所以配置错误必须在进程启动时炸,
 // 而不是退化成一个静默失效的榜。这里每一条都对应过一个真实缺陷:
 //   - weights 和不为 1 → coverage 与 TBS 的量纲失真;
-//   - bands 的维度不在 weights → band 项系数为 0,「太深的书不适合速成」这个卖点
-//     在公式上根本不成立(ship-this-week 从落地第一天起就是这样);
+//   - bands 的维度不在 weights → band 项系数为 0,「这份榜要的是中等深度而不是
+//     越深越好」这类卖点在公式上根本不成立(review B4,曾有一份榜从落地就是如此);
 //   - needs/weights 的维度名拼错 → 该维永远算 Missing,coverage 永远到不了 1。
 func (p Preset) Validate() error {
 	if p.ID == "" {

@@ -273,8 +273,7 @@ func TestSnapshotDataScoresEndToEnd(t *testing.T) {
 	}
 	// 零外部证据时,依赖外部数据的公开榜应当为空 —— 这是诚实,不是 bug。
 	require.Empty(t, res.Lists["timeless"], "无外部评分时 timeless 该是空的")
-	// 而只用本地信号的榜必须出得来。
+	// 而只用本地信号的榜必须出得来:否则 snapshot 阶段(ingest 还没跑)整个管道
+	// 交付不了任何东西,选材约束与理由串也就无从调试。
 	require.NotEmpty(t, res.Lists["library-hygiene"])
-	require.NotEmpty(t, res.Lists["publisher-picks"],
-		"零外部依赖的那份榜必须能出内容,否则 snapshot 阶段交付不了任何书单")
 }

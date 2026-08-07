@@ -78,7 +78,6 @@ func TestListsCarryWeightProfile(t *testing.T) {
 	// 权重和为 1、band 维度必有权重。这份响应此前只有 {id,name,description,size},
 	// 榜单页就没法把「这个排名按什么算」印给读者。
 	m := getJSON(t, doReq(t, newTestServer(t, true), http.MethodGet, "/api/v1/lists"))
-	var checkedBand bool
 	for _, x := range m["lists"].([]any) {
 		l := x.(map[string]any)
 		id := l["id"].(string)
@@ -93,17 +92,37 @@ func TestListsCarryWeightProfile(t *testing.T) {
 		require.Contains(t, []any{"desc", "asc"}, l["order"], "%s 缺 order", id)
 		require.Contains(t, l, "min_coverage", "%s 缺 min_coverage", id)
 
-		if bands, ok := l["bands"].(map[string]any); ok && len(bands) > 0 {
-			for dim, raw := range bands {
-				b := raw.(map[string]any)
-				require.Contains(t, b, "target", "%s 的 band %s 缺 target(json tag 丢了?)", id, dim)
-				require.Contains(t, b, "tol")
-				require.Contains(t, weights, dim, "%s 的 band 维度 %s 必须有权重", id, dim)
-				checkedBand = true
-			}
+		// band 是可选的:当前没有任何一份榜声明目标带(唯一用过 band 的维度是 D,
+		// 而 D 只来自 labels、生产里恒为 unknown,连同权重一起撤了)。声明了就必须自洽。
+		for dim, raw := range asMap(l["bands"]) {
+			b := raw.(map[string]any)
+			require.Contains(t, b, "target", "%s 的 band %s 缺 target", id, dim)
+			require.Contains(t, b, "tol")
+			require.Contains(t, weights, dim, "%s 的 band 维度 %s 必须有权重", id, dim)
 		}
 	}
-	require.True(t, checkedBand, "至少要有一份榜带 band,否则这条断言什么都没验")
+}
+
+func asMap(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	return m
+}
+
+func TestBandSerializesWithLowercaseKeys(t *testing.T) {
+	// 目标带的 json tag 掉了的话,前端拿到的是 {"Target":..,"Tol":..},读出来全是
+	// undefined —— 而榜单页不会报错,只会安静地按未加 band 的分数展示。
+	//
+	// 这条断言刻意**不依赖 presets.yaml 里恰好有一份榜带 band**:榜单是配置,
+	// 会随产品口径增减;序列化格式是契约,不该因为某天没人用 band 就失去防线。
+	raw, err := json.Marshal(metaOf(preset.Preset{
+		ID: "x", Weights: map[string]float64{"D": 1},
+		Bands: map[string]preset.Band{"D": {Target: 75, Tol: 35}},
+	}))
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Equal(t, map[string]any{"target": 75.0, "tol": 35.0},
+		asMap(got["bands"])["D"], "band 的 json tag 丢了")
 }
 
 // ---------- 准入语义 ----------

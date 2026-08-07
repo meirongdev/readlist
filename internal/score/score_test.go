@@ -434,13 +434,13 @@ func TestManualVetoValueAcceptsCommaSeparatedLists(t *testing.T) {
 	// 必须支持逗号分隔,否则「只否决这两份榜」根本无法表达。
 	db := openTestDB(t)
 	mustExec(t, db, `INSERT INTO overrides (work_id, field, value, reason, at)
-		VALUES ('w/x', 'veto', 'timeless, deep-dive', '这两份榜不合适', '2026-08-05T00:00:00Z')`)
+		VALUES ('w/x', 'veto', 'timeless, to-read-next', '这两份榜不合适', '2026-08-05T00:00:00Z')`)
 
 	manual, err := NewEngine(db, "1.0", testNow).loadManualLists()
 	require.NoError(t, err)
 	require.True(t, manual.Vetoed("w/x", "timeless"))
-	require.True(t, manual.Vetoed("w/x", "deep-dive"), "逗号后带空格的榜 id 也要生效")
-	require.False(t, manual.Vetoed("w/x", "to-read-next"), "没被点名的榜不受影响")
+	require.True(t, manual.Vetoed("w/x", "to-read-next"), "逗号后带空格的榜 id 也要生效")
+	require.False(t, manual.Vetoed("w/x", "fresh-releases"), "没被点名的榜不受影响")
 	require.False(t, manual.Vetoed("other/work", "timeless"))
 	require.False(t, manual.Pinned("w/x", "timeless"), "veto 不该被读成 pin")
 }
