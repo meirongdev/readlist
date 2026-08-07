@@ -22,9 +22,14 @@
 2. **分层级** —— 深度不是"越高越好"，它取决于你现在要解决什么问题。
 
 `readlist` 把这两件事做成显式的维度（时效按**主题半衰期**衰减、深度按**目标带**而非单调加权），
-再让榜单成为权重向量而不是写死的排序。同一份分数因此能同时支撑
-「经典长青」「最快上手」「深挖原理」「今年新书」，以及最有用的那个 ——
+再让榜单成为权重向量而不是写死的排序 —— 加一份榜 = 加一段 YAML，不改代码、不重算分数。
+
+当前公开三份：**「经典长青」「近一年新书」**，以及最有用的那个 ——
 **「下一本读什么」= 高分 ∩ 未读**。
+
+> 只列**在真实库上真的能选出书**的榜。依赖 LLM 标注的那几维（深度 / 可操作 / 层级 /
+> 主题标签）尚未实现（roadmap 第 6 步），靠它们准入的榜在生产库上恒为空，
+> 所以暂不公开；标注管道落地后把 YAML 加回来即可。
 
 ## 文档
 
@@ -38,12 +43,16 @@
 | [docs/data-baseline.md](docs/data-baseline.md) | **实测数据基线** —— 全部设计决定的地基，含可复跑 SQL |
 | [docs/scoring-standard.md](docs/scoring-standard.md) | **评分标准 TBS v1.0** 规格：7 维公式、归一化、证据分级、榜单预设 |
 | [docs/reading-status.md](docs/reading-status.md) | **阅读状态**：真相源、状态模型、补录、最小导出 |
-| [docs/architecture.md](docs/architecture.md) | 架构、数据模型、部署形状 |
+| [docs/system-design.md](docs/system-design.md) | **架构权威规格**：三层管道、逐维证据、选材层、公开面定义 |
+| [docs/architecture.md](docs/architecture.md) | 单二进制形状、快照隔离、部署与可观测（§3–§5 已由上一篇取代并删除） |
 | [docs/mvp.md](docs/mvp.md) | **MVP 实现**：命令、API、kind 端到端验证 |
-| [docs/review-2026-08-05.md](docs/review-2026-08-05.md) | **实现评审（二轮）**：4 个阻塞级缺陷（可复现性 / 准入闸门 / 公开面 / 滑块）与修法 |
-| [docs/review-2026-08-05-b.md](docs/review-2026-08-05-b.md) | **实现评审（三轮，面向上线）**：4 个阻塞级（出版社归一 / 污染日期 / TTL / 证据绑定）+ 观测与抗爬 |
 | [docs/homelab-deploy.md](docs/homelab-deploy.md) | **上线剩余工作归档**：homelab 清单 / 镜像 CI / 数据管道 / 备份 / 限流 |
 | [docs/roadmap.md](docs/roadmap.md) | 分期落地、风险、开放问题 |
+
+**历史评审记录**（记录当时的缺陷与修法，不是现行规格；改代码时以上表为准）：
+[一轮·文档](docs/review-2026-08-04.md) ·
+[二轮·实现](docs/review-2026-08-05.md)（可复现性 / 准入闸门 / 公开面 / 权重滑块）·
+[三轮·面向上线](docs/review-2026-08-05-b.md)（出版社归一 / 污染日期 / TTL / 证据绑定）
 
 ## 两条必须先知道的实测结论
 

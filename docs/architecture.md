@@ -1,13 +1,9 @@
 # 架构与数据模型
 
 > 日期: 2026-08-04
-> 状态: 📐 设计。**§3–§5（数据流 / 数据模型 / 缓存）已被
-> [system-design.md](system-design.md) 取代** —— 那边是三层管道（facts → judgement →
-> selection）与逐维证据模型，也是实现照着做的那份；本文的 §3–§5 只作历史记录。
-> 特别注意 §4 里的 `scores` 表**不存在**：综合分是 `f(dim_scores, preset)` 的纯函数，
-> 落库的是选材产物 `lists`。落地 schema 见
-> [`internal/store/migrations/0001_schema.sql`](../internal/store/migrations/0001_schema.sql)。
-> §1（单二进制）、§2（快照隔离）、§6（部署）、§7（可观测）仍然有效。
+> 状态: 📐 设计。本文只剩仍然有效的四节:§1(单二进制)、§2(快照隔离)、
+> §6(部署)、§7(可观测)。**§3–§5 已被 [system-design.md](system-design.md) 取代并删除**,
+> 那边是三层管道(facts → judgement → selection)与逐维证据模型,也是实现照着做的那份。
 > 环境事实依据: [data-baseline.md §4](data-baseline.md#4-环境事实)
 
 ---
@@ -61,70 +57,16 @@ sqlite3 < /scripts/export-reading.sql
 | 攻击面 | 公开 web 应用的任何 bug 都碰不到书库，也碰不到 `app.db` 里的凭据 |
 | 附带收益 | `readlist` 与 calibre 的**可用性解耦** —— calibre 挂了榜单照常服务 |
 
-## 3. 数据流
+## 3–5.（已删除）数据流 / 数据模型 / 外部数据源
 
-```
-calibre-books-local          ─┐
-  metadata.db (wal)          ├─ 每夜 CronJob ─► snapshot/metadata.db  (VACUUM INTO)
-calibre-web-...-config-local ─┘               └► snapshot/reading.db   (只导 3 表)
-  app.db  (阅读状态/书架)                                  │
-                                                          ▼
-Google Books / OpenLibrary / HN Algolia ──► fetch worker ──► evidence (缓存 + TTL)
-内部 LLM 网关 (本地 GPU) ─────────────────► label worker ──► labels
-                                                          │
-                                             score worker ▼
-                                    dim_scores → scores（按 standard_version）
-                                    + reading（徽章/筛选/阅读队列，不进分数）
-                                                          │
-                                             只读 API + 内嵌 SPA
-                                                          ▼
-                              Cilium Gateway ◄── Cloudflare Tunnel ◄── readlist.meirong.dev
-```
+这三节曾在这里给出一版设计,后来被 [system-design.md](system-design.md) 整体取代 ——
+那边是三层管道(facts → judgement → selection)与逐维证据模型,也是实现真正照着做的
+那一份。两份并存只会让人读到过期的那份(本文 §4 里的 `scores` 表就压根不存在),
+所以这里不再保留副本:
 
-## 4. 数据模型（SQLite）
-
-```
-books            书的规范化副本（来自 metadata.db 快照）+ pubdate_source
-reading          阅读状态（book_id, status, shelf, last_modified, downloads）——
-                 来自 app.db 最小导出，只读镜像，readlist 从不写
-evidence         外部原始响应（source, source_id, book_id, payload JSON, fetched_at, ttl）
-labels           LLM/人工标注（book_id, topic_class, level, depth, practicality,
-                 confidence, input_fingerprint, labeled_by, labeled_at）
-dim_scores       维度分（book_id, standard_version, dim, raw, pct, score）
-scores           综合分（book_id, standard_version, preset_id, tbs, evidence_grade, rank）
-overrides        人工否决/修正（book_id, field, value, reason, author, at）
-publisher_map    出版社名归一化 + tier（Packt 4 变体 → 1）
-mention_overrides HN 提及的人工否决（book_id, object_id, verdict, reason）
-runs             每次采集/评分的运行记录（起止、成功/失败数、孤儿行数、配额消耗）
-```
-
-### 哪些数据不可再生
-
-派生分随时可重算，但这三类是**人工投入的沉淀或昂贵缓存**：
-
-| 数据 | 为什么不可再生 |
-|------|--------------|
-| `overrides` / `mention_overrides` | 人工判断，无处可查 |
-| `publisher_map` | 一次性人工归一 + 规则积累 |
-| `evidence` | 重建要烧 2–3 天的免费配额 |
-
-→ 必须纳入夜备（[requirements.md](requirements.md) NFR-16）。
-阅读状态**不在此列** —— 它的真相源是 calibre-web，那边已有备份。
-
-## 5. 外部数据源与配额
-
-| 源 | 拿什么 | 配额/限制 | 本库适用面 |
-|----|--------|----------|-----------|
-| **Google Books API** | averageRating, ratingsCount, categories, pageCount, description | 无 key 约 1,000 次/天 | 310 volume id 直取 + 715 ISBN 查询 → **首轮分 2–3 天跑完**，之后只增量 |
-| **OpenLibrary** | ratings、works、pubdate | 免费、不限速（礼貌 0.5s 间隔） | 补 Google 查不到的；技术书覆盖一般 |
-| **HN Algolia** | 提及次数 + 讨论链接 | 免费无 key，建议 ≤10 rps | 全库（受匹配规则约束） |
-| **GitHub Search** | awesome-list 收录次数 | 需 PAT，30 req/min | 可选，次要权重 |
-| **内部 LLM 网关** | 深度/可操作/主题/层级标注 | 本地 GPU，无外部成本 | 全库 |
-| ~~Goodreads~~ | — | **API 2020 已关停** | 不用 |
-| ~~ISBNdb / WorldCat~~ | — | 付费 | 不用 |
-
-**缓存策略**：外部响应**原样存 JSON** + TTL（评分类 30 天，元数据类 180 天）。
-所有派生分从缓存重算，**重算不打外部 API**。稳态下每天只有几十次请求。
+- 数据流与三层管道 → [system-design.md §0 / §3–§5](system-design.md)
+- 数据模型(权威) → [`internal/store/migrations/0001_schema.sql`](../internal/store/migrations/0001_schema.sql)
+- 外部数据源与配额 → [system-design.md §6](system-design.md)、[scoring-standard.md](scoring-standard.md)
 
 ## 6. 部署与暴露
 

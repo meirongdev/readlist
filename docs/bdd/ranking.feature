@@ -9,21 +9,18 @@
   背景:
     假设 系统已完成一次评分，dim_scores 表包含 standard_version=1.0 的逐维得分与证据状态
     而且 综合分 TBS 是 (dim_scores, preset) 的纯函数，不落库；落库的是选材产物 lists
-    而且 存在预设 timeless / ship-this-week / deep-dive / fresh-releases / ai-llm / to-read-next / read-and-loved
+    而且 存在公开预设 timeless / fresh-releases / to-read-next，以及内部预设 library-hygiene
 
   场景: 按预设切换榜单
-    当 访客打开榜单页并选择预设 "deep-dive"
-    那么 榜单按 deep-dive 的权重、目标带与过滤器排序
+    当 访客打开榜单页并选择预设 "fresh-releases"
+    那么 榜单按 fresh-releases 的权重、目标带与过滤器排序
     而且 每个榜单项展示综合分、证据等级与阅读状态徽章
 
-  @P1
-  场景: 权重滑块即时重排，不经过网络
+  场景: 榜单的口径对读者可见
     假如 榜单响应带有该预设的 weights、bands、order 与 min_coverage
-    当 访客拖动权重滑块调整 A 维权重
-    那么 榜单在浏览器内即时重排，并重新编号位次
-    而且 不发起任何网络请求
-    而且 重排结果等于「维度分 × 调整后权重」的纯客户端点积
-    而且 默认权重下客户端算出的 TBS 与 coverage 与后端逐位一致
+    当 访客打开榜单页
+    那么 页面在标题下方印出这份榜的权重档案
+    而且 印出的每一维都真的参与了排序 —— 不声明恒被 renormalize 掉的权重
 
   场景: 不参与的维度既不占权重也不隐式惩罚
     假如 预设 timeless 的 weights 里不含 F
@@ -38,7 +35,7 @@
     而且 TBS 等于「可用维度加权和 ÷ 0.90」，而不是让 D 吃一个编出来的先验值
 
   场景: 深度按目标带打分而非单调加权
-    假如 预设 ship-this-week 声明 bands: { D: { target: 35, tol: 25 } }
+    假如 某预设声明 bands: { D: { target: 35, tol: 25 } }
     而且 D 在该预设的 weights 里占一份权重
     当 计算一本深度分 90 的书
     那么 该书在 D 维的得分低于一本深度分 35 的书
@@ -95,5 +92,5 @@
   @P1
   场景: 已读且个人高分进入推荐榜
     假如 某本书已读且库内个人评分 ≥ 4
-    当 预设 read-and-loved 生成榜单
+    当 按「已读 ∩ 个人评分高」的口径生成榜单
     那么 该书出现且标记"作者读过"

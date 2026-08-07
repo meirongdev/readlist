@@ -113,7 +113,8 @@
 | ID | 需求 | 优先级 |
 |----|------|--------|
 | FR-30 | 榜单定义为**外置配置**（权重 + 目标带 + `needs` + 选材约束 + 过滤器），加榜不改代码、不重算分数；不参与的维度不写权重即为豁免。配置在**加载时强制校验**，写错则启动失败 | P0 |
-| FR-31 | 内置预设：`timeless` / `ship-this-week` / `deep-dive` / `fresh-releases` / `ai-llm` / `to-read-next` / `read-and-loved` / `library-hygiene`(内部) | P0 |
+| FR-31 | 内置预设：`timeless` / `fresh-releases` / `to-read-next` / `library-hygiene`(内部) | P0 |
+| FR-31b | 依赖 LLM 标注的预设（`ship-this-week` / `deep-dive` / `ai-llm` / `read-and-loved`）随标注管道一起交付 —— 它们的 `needs` / `filters` 要 `D`/`P`/`level`/`topics`，而这些只来自 `labels` 表；标注未落地前上这些榜只会得到四个恒空的 tab | P2 |
 | FR-32 | 前端可调权重滑块，即时重排（纯客户端向量点积）。`/api/v1/lists` 须随榜返回 `weights`/`bands`/`order`/`min_coverage`，且客户端公式与后端逐位一致 | P1 |
 | FR-33 | 支持 `visibility: internal` 的榜单（如书库卫生榜），不出现在公开导航 | P1 |
 | FR-34 | 书详情页展示**得分拆解**：各维度分、原始值、数据来源、证据等级、标准版本 | P0 |

@@ -58,7 +58,7 @@
 | 首次 `snapshot` | 秒级。产出 works/editions/reading + 孤儿数与 pubdate 污染计数 |
 | 首轮 `ingest` | 约 1,000–1,500 次请求 → 按 `INGEST_BUDGET=800` 分 **2 晚**跑完 |
 | **配 `GOOGLE_BOOKS_KEY`** | ⚠️ 实测(2026-08-05)匿名配额是**按共享项目**计的,一次探测就拿到 429。没有 key 的话 A 维与 F 维基本拿不到数据 |
-| 人工:建 `想读`/`弃读`/`精读` 书架,给 23 本已读补个人星级 | 决定 `to-read-next` / `read-and-loved` 有没有内容,**只有库主人能做** |
+| 人工:建 `想读`/`弃读`/`精读` 书架,给 23 本已读补个人星级 | 决定 `to-read-next` 有没有内容,**只有库主人能做** |
 
 ### 3.3 边缘限流与可观测(拦路项 C —— 公开前的底线)
 
@@ -116,7 +116,7 @@ $K create job bootstrap-snapshot --from=cronjob/readlist-snapshot
 $K wait --for=condition=complete job/bootstrap-snapshot --timeout=300s
 $K logs job/bootstrap-snapshot
 
-# 2) 打分:此时只有 T 与 readability 两维,先确认 publisher-picks 出得来
+# 2) 打分:此时只有 T 与 readability 两维,先确认 library-hygiene(内部榜)出得来
 $K create job bootstrap-score --from=cronjob/readlist-score
 $K wait --for=condition=complete job/bootstrap-score --timeout=300s
 $K logs job/bootstrap-score
@@ -134,8 +134,9 @@ $K create job bootstrap-score2 --from=cronjob/readlist-score
 $K delete job bootstrap-snapshot bootstrap-score bootstrap-ingest bootstrap-score2
 ```
 
-**建议在第 2 步之后、建 HTTPRoute 之前先看一眼 `publisher-picks`(内部榜)**——
-它零外部依赖,能直接反映出版社归一、work 聚类、孤儿数是否正常。
+**建议在第 2 步之后、建 HTTPRoute 之前先看一眼 `library-hygiene`(内部榜)与
+`readlist dryrun` 的输出**—— 这一步零外部依赖,能直接反映出版社归一、work 聚类、
+孤儿数是否正常(三份公开榜此时都还是空的:它们的 `needs` 全要外部证据)。
 确认没问题再放 ingest,最后才把域名接上。
 
 ### 4.2 首轮 ingest 分几晚

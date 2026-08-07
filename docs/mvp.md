@@ -66,13 +66,18 @@ readlist init      # seed + 首次 score(供 kind initContainer;已发布则跳�
 | 缓存 | 快照按 `published_run` 在进程内缓存;内容端点带 `ETag: run_id` 并处理 `If-None-Match`(304);静态资源用内容指纹做 ETag |
 | 探针 | `/healthz` 查库(readiness)、`/livez` 不碰库(liveness)—— 数据库慢是「别收流量」,不是「重启我」 |
 | 人工干预 | `overrides` 的 `veto` / `pin` 在选材层生效(pin 绕过全部准入,理由串写明「人工置顶」);`mention_overrides` 逐条否决 HN 误匹配 |
-| 前端 | 内嵌 SPA:预设切换 + 权重滑块(纯客户端点积/band/coverage 重排,与后端公式逐位一致)+ 阅读徽章 + 上榜书目页逐本标注缺哪几维 |
-| 阅读状态 | 只读镜像,facet 不进分;受 `EXPOSE_READ_STATUS` 控制;`to-read-next` / `read-and-loved` 由它派生 |
+| 前端 | 内嵌 SPA(纯展示层):榜单切换 + 口径(权重)明示 + 排名/理由串/覆盖率 + 阅读徽章 + 上榜书目页 |
+| 阅读状态 | 只读镜像,facet 不进分;受 `EXPOSE_READ_STATUS` 控制;`to-read-next` 由它派生 |
 
 ## 4. 演示语料
 
 `seed` 生成 50 个 work(含 3 组多版次聚类、2 本中文书、未来日期 1 本、低置信 1 本),
-覆盖全部预设,其中 `read-and-loved` 演示"补录个人评分后开起来"。
+覆盖全部预设。
+
+⚠️ 它同时是全仓**唯一**会往 `labels` 表写数据的地方。真实库上 `labels` 是空的
+(LLM 标注是 roadmap 第 6 步,尚未实现),所以 D / P 两维在生产里恒为 `unknown`,
+而 `level` 与 `topics` 同样只来自 `labels`。用演示语料验证过的东西,不等于在真实库上
+也有内容 —— 想复现生产状态,`DELETE FROM labels` 之后再 `score`。
 
 ⚠️ **演示语料只用于本地与 kind**。生产的 initContainer 不该跑 `seed` ——
 `deploy/oracle/` 的清单里没有 `init`,数据全部来自 `snapshot`。
@@ -80,15 +85,15 @@ readlist init      # seed + 首次 score(供 kind initContainer;已发布则跳�
 ## 5. 构建 / 测试 / 本地运行
 
 ```bash
-make check          # fmt + vet + go test + test-spa(离线)
-make test-spa       # 校验 SPA 客户端重排与后端公式逐位一致(需 node,缺则跳过)
+make check          # fmt + vet + go test(离线)
 make smoke          # seed + score + dryrun(本地直跑)
 make run            # 本地起服务(:8080,内嵌 SPA)
 ```
 
-`test-spa` 单列一项是因为权重滑块把 `score.Combine` 的公式在 `app.js` 里实现了第二遍,
-两份实现之间没有编译器把关。它起一个真实服务,在 node 里加载真正的 `app.js`,
-逐本比对客户端与后端算出的 TBS / coverage / 位次。
+SPA 是纯展示层:位次、TBS、覆盖率全部由服务端算好后直接渲染,不存在「客户端公式 vs
+服务端公式」需要对齐,因此也没有 node 依赖。这里曾经有一个 `test-spa` 目标,是权重滑块
+留下的 —— 滑块把 `score.Combine` 在 `app.js` 里实现了第二遍,只能靠一条跑真服务的
+parity 测试把两份公式钉在一起。滑块撤掉后,那份重复实现和它的防线一起消失了。
 
 ## 6. kind 端到端
 
@@ -101,7 +106,7 @@ make e2e            # 等价于 ./scripts/e2e-kind.sh
 
 - `/healthz` 正常且带 run_id 与 corpus_id;`/api/v1/meta` 有 run_id 与 standard_version
 - 公开榜列表不含 `library-hygiene`(internal),按 id 直接请求它也 404
-- 每份榜都带滑块所需口径:`weights`(和为 1)、`order`、`min_coverage`,且 `bands ⊆ weights`
+- 每份榜都带完整口径:`weights`(和为 1)、`order`、`min_coverage`,且 `bands ⊆ weights`
 - `timeless` 榜:有内容、TBS 为正、带理由串、coverage 达门槛;
   **且含至少一本 F 为 unknown 的书** —— 该榜不使用时效维度,证据字母不该当闸门(review B1 回归)
 - `/api/v1/works/{id}`:得分拆解 + standard_version + 版次 + 外链为已转义的 https
@@ -110,8 +115,7 @@ make e2e            # 等价于 ./scripts/e2e-kind.sh
 - `/metrics`:Prometheus 指标(等级计数 / 保留 run 数 / last_score)
 - `matrix/{run}`:**已下线**,请求任何 run 都必须 404 —— 它是全库 works × dims 的整块导出
 - 零写接口:POST/PUT/DELETE 一律 405
-- `read-and-loved` 有内容;SPA 首页可访问
-- SPA 客户端重排与后端公式逐位一致(有 node 时执行 `scripts/spa-parity.js`)
+- `to-read-next` 有内容;SPA 首页可访问
 
 部署清单:命名空间 + PVC(100Mi,local-path)+ Deployment(单副本 Recreate,
 initContainer `readlist init` 建库并在**尚未发布 run 时**打分)+ NodePort Service(30080)
