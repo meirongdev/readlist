@@ -8,7 +8,7 @@
 这是**规格文档**，不是设计讨论。实现应当逐条对照本文；本文改动 = 标准升版。
 
 > **本文取代过的三处写法**（都曾在实现里造成静默失效，修订记录见
-> [review-2026-08-05.md](review-2026-08-05.md)）：
+> [review-2026-08-05.md](../archive/review-2026-08-05.md)）：
 > 单一 A/B/C/D 证据闸门 → 逐维三态 + `needs`（§5）；preset 级 `exempt` → 逐本
 > renormalize 与 `coverage`（§4.3）；`filters.min_evidence` → `needs`（§6）。
 
@@ -121,7 +121,7 @@ F = 100 · 0.5 ^ (age_years / half_life)
 | 够不够**老**（`min_age_years`） | 未被污染来源里的最早版次 | **放行**，且理由串写明「年龄未核实」 |
 
 「够老」若也失败，那 477 本（23%）只有 mtime 兜底日期、又没有标识符可供 `ingest` 补救的书
-会整批从「经典长青」消失 —— 那正是 [review-2026-08-04](review-2026-08-04.md) B1 判定为
+会整批从「经典长青」消失 —— 那正是 [review-2026-08-04](../archive/review-2026-08-04.md) B1 判定为
 「模型错了」的全局闸门，只是换成从过滤器进来。要严格，preset 自己声明 `needs: {F: measured}`。
 
 「未被污染」比「可信」宽一档：`calibre` 来源（pubdate ≠ 文件 mtime，所以不是兜底值）
@@ -299,7 +299,7 @@ preset 用 `needs` 声明自己要什么。**准入 = `needs` 全部满足 且 `
 
 ## 6. 榜单预设（权重档案）
 
-配置即数据。**唯一真相源是 [`internal/preset/presets.yaml`](../internal/preset/presets.yaml)**
+配置即数据。**唯一真相源是 [`internal/preset/presets.yaml`](../../internal/preset/presets.yaml)**
 （内嵌进二进制）。本文只定义字段语义 —— 此前这里抄了一份完整预设清单，两边随即漂移。
 
 | 字段 | 语义 |

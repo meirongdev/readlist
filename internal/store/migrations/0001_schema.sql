@@ -1,4 +1,4 @@
--- readlist 真相源 schema —— 对应 docs/system-design.md §8
+-- readlist 真相源 schema —— 对应 docs/spec/system-design.md §8
 -- 三层:facts(实体+证据) → judgement(dim_scores+norm_cdf) → selection(lists)
 
 -- ── 实体层 ────────────────────────────────────────────────────────────

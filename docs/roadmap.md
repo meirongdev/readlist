@@ -2,7 +2,7 @@
 
 > 日期: 2026-08-04
 > 状态: 📐 计划（未开工）
-> 验收标准见 [requirements.md §7](requirements.md#7-验收标准)
+> 验收标准见 [requirements.md §7](spec/requirements.md#7-验收标准)
 
 ---
 
@@ -15,8 +15,8 @@
 纯手工，与写代码并行。做不做决定「已读徽章」和「下一本读什么」榜有没有内容。
 
 1. 在 calibre-web 建 3 个书架：`想读` / `弃读` / `精读`
-   （[reading-status.md §3](reading-status.md#3-状态模型核心三态--书架承载扩展状态)）。
-2. 跑 [reading-status.md §6](reading-status.md#6-补录历史阅读记录真正的工作量) 的候选清单 SQL
+   （[reading-status.md §3](spec/reading-status.md#3-状态模型核心三态--书架承载扩展状态)）。
+2. 跑 [reading-status.md §6](spec/reading-status.md#6-补录历史阅读记录真正的工作量) 的候选清单 SQL
    （54 本），在 UI 里逐本标已读 / 想读 / 弃读。
 3. **给已读的 23 本补个人星级** —— 这是 `read-and-loved` 榜的唯一输入（现在只有 3 本）。
    注意该榜还额外卡在 `needs: {D: measured}` 上，要等 LLM 标注（下面第 6 步）一起才能开。
@@ -35,7 +35,7 @@
 
 ### Phase 2 — 离线打分管线（无 UI，先证明分数靠谱）
 
-1. 快照 CronJob（`VACUUM INTO` + `app.db` 最小导出）+ [architecture.md §4](architecture.md#4-数据模型sqlite) 的表结构。
+1. 快照 CronJob（`VACUUM INTO` + `app.db` 最小导出）+ [architecture.md §4](spec/architecture.md#4-数据模型sqlite) 的表结构。
 2. 实现 **A / F / T / L** 四维（**纯数据，不依赖 LLM**）→ 先出一版 `timeless` 榜。
 3. **接阅读状态 → 立刻能出 `to-read-next` 榜。**
    这一步几乎零成本，却是整个项目对自己最有用的产出，**别排到最后**。
@@ -49,7 +49,7 @@
 
 1. 内嵌 SPA：榜单页（预设切换 + 权重滑块 + **阅读状态徽章/筛选**）、
    书详情页（**得分拆解 + 数据来源 + 标准版本**）、上榜书目页（各榜并集，含 C 级书，标"数据不足"）。
-   公开面只有上榜书 —— 全库不进公开面（见 [system-design.md §10](system-design.md)）。
+   公开面只有上榜书 —— 全库不进公开面（见 [system-design.md §10](spec/system-design.md)）。
 2. 清单进 homelab 仓库并在 kustomize 树里**登记**；HTTPRoute + 导航页条目 + 可用性监控。
 3. Cloudflare 限流（页面 / `/api/` 分档）。
 4. `readlist-data` 加进夜备名单（CI 规则 H4 会拦）。
@@ -57,7 +57,7 @@
 ### Phase 4 — 收尾
 
 1. 指标接入监控（采集成功率 / 配额消耗 / 各证据等级书数 / 孤儿行数）。
-2. 评分标准定版为 `1.0`，此后改动走 [scoring-standard.md §8](scoring-standard.md#8-版本治理) 的版本治理。
+2. 评分标准定版为 `1.0`，此后改动走 [scoring-standard.md §8](spec/scoring-standard.md#8-版本治理) 的版本治理。
 3. homelab 侧的服务清单与开放项列表更新。
 
 ## 2. 依赖关系
@@ -91,7 +91,7 @@ Phase 2 ──► Phase 3 ──► Phase 4
 |---|---|
 | **影响** | 密码 hash（2 行）、会话（2 行）、OIDC 凭据（3 行）落到公开服务能读到的卷上 |
 | **概率** | 中 —— 这是"图省事就会犯"的错，`VACUUM INTO` 整库比写三条 SQL 省事 |
-| **缓解** | [reading-status.md §4](reading-status.md#4--只导出需要的表--appdb-含密码-hash-和-oidc-凭据) 的最小导出；**写进代码 review 清单** |
+| **缓解** | [reading-status.md §4](spec/reading-status.md#4--只导出需要的表--appdb-含密码-hash-和-oidc-凭据) 的最小导出；**写进代码 review 清单** |
 
 ### R-3 HN 标题误匹配
 

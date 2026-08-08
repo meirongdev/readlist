@@ -6,7 +6,7 @@
 > 定位: **产品视角**的"为什么做、为谁做、做成什么样、怎么算成功"。
 > 详细技术规格不在此重复，见：需求规格 [requirements.md](requirements.md)、评分标准
 > [scoring-standard.md](scoring-standard.md)、阅读状态 [reading-status.md](reading-status.md)、
-> 架构 [architecture.md](architecture.md)、路线 [roadmap.md](roadmap.md)。
+> 架构 [architecture.md](architecture.md)、路线 [roadmap.md](../roadmap.md)。
 
 ---
 
@@ -149,7 +149,7 @@
 
 ## 10. 风险与依赖
 
-最高风险（完整登记见 [roadmap.md](roadmap.md)）：
+最高风险（完整登记见 [roadmap.md](../roadmap.md)）：
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|

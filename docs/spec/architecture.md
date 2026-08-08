@@ -65,7 +65,7 @@ sqlite3 < /scripts/export-reading.sql
 所以这里不再保留副本:
 
 - 数据流与三层管道 → [system-design.md §0 / §3–§5](system-design.md)
-- 数据模型(权威) → [`internal/store/migrations/0001_schema.sql`](../internal/store/migrations/0001_schema.sql)
+- 数据模型(权威) → [`internal/store/migrations/0001_schema.sql`](../../internal/store/migrations/0001_schema.sql)
 - 外部数据源与配额 → [system-design.md §6](system-design.md)、[scoring-standard.md](scoring-standard.md)
 
 ## 6. 部署与暴露

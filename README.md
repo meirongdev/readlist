@@ -1,85 +1,100 @@
 # readlist
 
-> 技术书多维评分标准 + 公开书单站。
-> 把私有 Calibre 书库（2,054 本）按 **7 个独立维度**打分，榜单 = 维度分上的**权重档案**，
-> 并标注每本书的**阅读状态**。公开站只发**上榜书**的元数据与评分 ——
-> 不发书，也**不发全库目录**：全库进的是打分管道，公开面只有推荐书单及其收录的书。
+> 一个人的技术书单站。
 
-**状态**：✅ 全管道已实现（`snapshot` → `ingest` → `score` → `serve`），kind 端到端通过，镜像 CI 就位。
-✅ 三轮评审的阻塞级缺陷均已修（见下方文档表），公开面已具备抗爬与观测能力。
-🟡 上线剩余工作在 **homelab 仓库**（清单登记 + 备份归属）与 Cloudflare（限流）——
-见 [docs/homelab-deploy.md](docs/homelab-deploy.md)。
-**日期**：2026-08-05
+我有一个 2,054 本的 Calibre 技术书库。`readlist` 给里面的书打分，挑出几份书单公开出来 ——
+**站上只有上过榜的那百来本**，全库既不展示也不提供检索。不发书，只发书单和上榜书的元数据。
 
----
+## 三份书单
 
-## 这是什么
+| 书单 | 挑的是什么 | 怎么排的 |
+|------|-----------|---------|
+| **经典长青** | 出版满 3 年、经得起时间检验的书 | 口碑 35% · 技术圈声量 30% · 权威 25% · 馆藏可读性 10% |
+| **近一年新书** | 近 12 个月出版、且**出版日期可信**的书 | 口碑 40% · 技术圈声量 33% · 权威 27% |
+| **下一本读什么** | 高分 ∩ 我还没读的 | 口碑 35% · 技术圈声量 30% · 权威 25% · 馆藏可读性 10% |
 
-网上的技术书排行榜基本只有一两个维度（读者评分，或社区提及数），而技术书区别于一般书的
-两件事恰好是通用榜最薄的地方：
+每份书单就是一组权重 —— 同一批分数，换一组权重就是另一份榜。权重直接印在书单页标题下面，
+不藏在后台：**你看到的排名是按什么算的，页面上写着**。
 
-1. **会过时** —— 一本讲 React 18 的书和一本讲编译原理的书，"三年前出版"的含义完全不同；
-2. **分层级** —— 深度不是"越高越好"，它取决于你现在要解决什么问题。
+## 分数怎么读
 
-`readlist` 把这两件事做成显式的维度（时效按**主题半衰期**衰减、深度按**目标带**而非单调加权），
-再让榜单成为权重向量而不是写死的排序 —— 加一份榜 = 加一段 YAML，不改代码、不重算分数。
+书名旁的数字（TBS，0–100）是四个维度的加权平均：
 
-当前公开三份：**「经典长青」「近一年新书」**，以及最有用的那个 ——
-**「下一本读什么」= 高分 ∩ 未读**。
+| 维度 | 看的是什么 | 数据从哪来 |
+|------|-----------|-----------|
+| **口碑** | 跨源评分，按评分人数做贝叶斯收缩 —— 3,000 人打的 4.5 分比 5 个人打的 5.0 分更可信 | Google Books / OpenLibrary |
+| **技术圈声量** | Hacker News 上被提到过几次，越久远的提及权重越低 | HN Algolia |
+| **权威** | 出版社层级 × 作者是否可考 | 本地元数据 |
+| **馆藏可读性** | 格式、封面、简介、ISBN 是否齐全 | 本地元数据 |
 
-> 只列**在真实库上真的能选出书**的榜。依赖 LLM 标注的那几维（深度 / 可操作 / 层级 /
-> 主题标签）尚未实现（roadmap 第 6 步），靠它们准入的榜在生产库上恒为空，
-> 所以暂不公开；标注管道落地后把 YAML 加回来即可。
+还有三件事值得知道：
+
+- **「按 4/4 维评出 · 覆盖 100%」** —— 某一维实在没有证据时，它不会被填一个猜出来的数，
+  而是被**整个移出这本书的权重**再重新归一。所以覆盖率低的书，分数是在更少的维度上算的。
+- **A/B/C/D 徽章** —— 只表示证据有多足，**不参与任何准入**。A = 四维全有实测证据；
+  D = 有维度连收缩都不合理。它不是"书好不好"的评级。
+- **「为什么」那一行** —— 每本书上榜的理由是算出来的，不是写出来的。人工置顶的书会明说
+  「人工置顶」：策展不该伪装成算法结果。
+
+分数**只在本库内部可比**。它衡量的是「在我这 2,054 本里，这本书的证据有多强」，
+不是这本书在世界上的绝对排名。
+
+## 为什么搜不到某本书
+
+公开面 = **三份书单的并集**，不是全库目录。没上榜的书按 id 直接请求也是 404。
+「上榜书目」页是这三份榜去重后的总表，不是我的藏书清单。
+
+有些书进不了榜是因为**缺证据**而不是因为差：一本没有 ISBN 的自出版好书拿不到外部评分，
+就进不了要求「口碑可信」的榜。这是诚实，不是筛选。
+
+## 自己跑一份
+
+```bash
+make run      # 起服务 :8080,内嵌页面,首次会自动用演示语料打一次分
+make smoke    # 不起服务,只看每维实测比例与每份榜选出几本
+```
+
+演示语料是 50 本内置的书，不需要 Calibre 库。想对着真实书库跑见
+[docs/guide/operating.md](docs/guide/operating.md)。
 
 ## 文档
 
-按这个顺序读：
+**日常使用（库主人）**
 
-| 文档 | 回答什么 |
-|------|---------|
-| [docs/requirements.md](docs/requirements.md) | **需求分析**（主文档）：目标、场景、FR/NFR、验收标准 |
-| [docs/prd.md](docs/prd.md) | **产品需求文档（PRD）**：定位、成功指标、发布计划 |
-| [docs/bdd/](docs/bdd/) | **BDD 行为规格**：Gherkin 场景，需求 → 验收的可执行映射 |
-| [docs/data-baseline.md](docs/data-baseline.md) | **实测数据基线** —— 全部设计决定的地基，含可复跑 SQL |
-| [docs/scoring-standard.md](docs/scoring-standard.md) | **评分标准 TBS v1.0** 规格：7 维公式、归一化、证据分级、榜单预设 |
-| [docs/reading-status.md](docs/reading-status.md) | **阅读状态**：真相源、状态模型、补录、最小导出 |
-| [docs/system-design.md](docs/system-design.md) | **架构权威规格**：三层管道、逐维证据、选材层、公开面定义 |
-| [docs/architecture.md](docs/architecture.md) | 单二进制形状、快照隔离、部署与可观测（§3–§5 已由上一篇取代并删除） |
-| [docs/mvp.md](docs/mvp.md) | **MVP 实现**：命令、API、kind 端到端验证 |
-| [docs/homelab-deploy.md](docs/homelab-deploy.md) | **上线剩余工作归档**：homelab 清单 / 镜像 CI / 数据管道 / 备份 / 限流 |
-| [docs/roadmap.md](docs/roadmap.md) | 分期落地、风险、开放问题 |
+| | |
+|---|---|
+| [guide/operating.md](docs/guide/operating.md) | 加一份书单、书单空了怎么查、对着真实书库跑管道、该盯哪些指标 |
+| [guide/deploy.md](docs/guide/deploy.md) | 上线：homelab 清单、镜像 CI、首轮引导、备份与限流 |
 
-**历史评审记录**（记录当时的缺陷与修法，不是现行规格；改代码时以上表为准）：
-[一轮·文档](docs/review-2026-08-04.md) ·
-[二轮·实现](docs/review-2026-08-05.md)（可复现性 / 准入闸门 / 公开面 / 权重滑块）·
-[三轮·面向上线](docs/review-2026-08-05-b.md)（出版社归一 / 污染日期 / TTL / 证据绑定）
+**规格与设计（改代码前读）**
 
-## 两条必须先知道的实测结论
+| | |
+|---|---|
+| [spec/requirements.md](docs/spec/requirements.md) | 需求分析（主文档）：目标、场景、FR/NFR、验收标准 |
+| [spec/prd.md](docs/spec/prd.md) | 产品需求：定位、成功指标、发布计划 |
+| [spec/data-baseline.md](docs/spec/data-baseline.md) | **实测数据基线** —— 全部设计决定的地基，含可复跑 SQL |
+| [spec/scoring-standard.md](docs/spec/scoring-standard.md) | **评分标准 TBS v1.0**：7 维公式、归一化、证据分级、榜单预设 |
+| [spec/system-design.md](docs/spec/system-design.md) | **架构权威规格**：三层管道、逐维证据、选材层、公开面定义 |
+| [spec/reading-status.md](docs/spec/reading-status.md) | 阅读状态：真相源、状态模型、补录、最小导出 |
+| [spec/architecture.md](docs/spec/architecture.md) | 单二进制形状、快照隔离、部署与可观测 |
+| [spec/mvp.md](docs/spec/mvp.md) | 已实现的命令与 API、kind 端到端验证 |
+| [spec/bdd/](docs/spec/bdd/) | BDD 行为规格：Gherkin 场景，需求 → 验收的可执行映射 |
+| [roadmap.md](docs/roadmap.md) | 分期落地、风险、开放问题 |
 
-摸过生产库之后，有两件事和直觉不一样，它们决定了排期：
+**历史评审记录** —— 记录当时的缺陷与修法，**不是现行规格**：
+[一轮·文档](docs/archive/review-2026-08-04.md) ·
+[二轮·实现](docs/archive/review-2026-08-05.md) ·
+[三轮·面向上线](docs/archive/review-2026-08-05-b.md)
 
-1. ⚠️ **`pubdate` 已被污染。** 477 本书标着"2026 年出版"（今年才过去 7 个月）——
-   来自 2026-07 那次元数据补全的 mtime 兜底，把「文件修改时间」写成了出版日期。
-   **不先修，时效维度和「今年新书」榜就是假的。**
-2. ⚠️ **阅读状态只覆盖 23 本（1.1%）。** 状态确实在 SQLite 里（calibre-web 的 `app.db`，
-   不是书库的 `metadata.db`），但管道好写、**补录才是工作量**，而那只有库主人自己能做。
+## 状态
 
-细节见 [docs/data-baseline.md](docs/data-baseline.md)。
+全管道已实现（`snapshot` → `ingest` → `score` → `serve`），kind 端到端通过，镜像 CI 就位。
+上线剩余工作在 [homelab](https://github.com/meirongdev/homelab) 仓库与 Cloudflare（限流），
+见 [guide/deploy.md](docs/guide/deploy.md)。
 
-第 1 条现在由代码强制：`snapshot` 产出的 `pubdate` 来源（`calibre` / `mtime-fallback` /
-`unknown`）**没有一种在可信名单里**，时效维度一律记 `unknown`；只有 `ingest` 从
-Google Books / OpenLibrary 拿到的日期才算数。这也意味着修 `pubdate` **不需要**先去改
-calibre 的库 —— 外部响应里本来就带 `publishedDate`。
+⚠️ 深度 / 可操作 两维尚无数据源（需要 LLM 标注，roadmap 第 6 步），靠它们准入的书单
+在真实库上恒为空，所以暂不公开。标注管道落地后把 YAML 加回来即可，不用改代码。
 
-第 3 条实测新增（2026-08-05）：⚠️ **Google Books 的匿名配额是按共享项目计的**，
-一次探测请求就直接拿到 429。上线前必须配 `GOOGLE_BOOKS_KEY`，否则 A 维与 F 维基本拿不到数据。
-
-## 与 homelab 仓库的关系
-
-- **本仓库**：产品需求、评分标准规格、应用源码与镜像 CI。
-- **[homelab](https://github.com/meirongdev/homelab) 仓库**：**部署清单的唯一真相源**
-  （`cloud/oracle/manifests/`），ArgoCD 只指向那里。上线所需的动作（清单 + kustomize 登记
-  + HTTPRoute + 备份归属 + 边缘限流）挂在那边的 `docs/ROADMAP.md` 开放项里；
-  **本仓库是需求与评分标准的唯一真相源**，homelab 侧不再保留副本。
-
-本仓库里如果日后放 `deploy/` 参照清单，那只是参照 —— 集群实际部署的是 homelab 仓库那份。
+**部署清单的唯一真相源在 [homelab](https://github.com/meirongdev/homelab) 仓库**
+（`cloud/oracle/manifests/`），ArgoCD 只指向那里；本仓库的 `deploy/` 只是 kind 与参照用。
+反过来，**需求与评分标准的唯一真相源是本仓库**，homelab 侧不保留副本。

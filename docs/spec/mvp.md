@@ -2,7 +2,7 @@
 
 > 状态: 已实现,本地 kind 端到端验证通过(2026-08-05)
 > 对应规格: [system-design.md](system-design.md)(三层:facts → judgement → selection)
-> 实现评审与修法: [review-2026-08-05.md](review-2026-08-05.md)(4 个阻塞级 + 9 项重要问题已修)
+> 实现评审与修法: [review-2026-08-05.md](../archive/review-2026-08-05.md)(4 个阻塞级 + 9 项重要问题已修)
 
 ## 1. 这是什么
 
@@ -125,7 +125,7 @@ initContainer `readlist init` 建库并在**尚未发布 run 时**打分)+ NodeP
 
 - `snapshot` / `ingest` 已实现并测试(见 `internal/calibre`、`internal/facts`),
   但**尚未对着真实 calibre 卷跑过** —— 那需要 homelab 侧的清单先落地。
-  剩余上线工作见 [homelab-deploy.md](homelab-deploy.md)。
+  剩余上线工作见 [homelab-deploy.md](../guide/deploy.md)。
 - 生产参照清单在 `deploy/oracle/`(真相源仍是 homelab 仓库);`deploy/kind/` 只作本地验证。
 - 镜像 CI 已就位:打 `v*` tag → buildx 推 amd64+arm64 到 ghcr(禁 `latest`)。
 - **尚未做且不阻塞上线**:LLM 标注(D/P 两维缺失时依赖它们的榜自然为空,诚实且安全)、

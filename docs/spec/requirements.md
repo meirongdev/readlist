@@ -184,7 +184,7 @@
 
 ## 7. 验收标准
 
-按 [roadmap.md](roadmap.md) 的分期，每期都必须能独立验收。
+按 [roadmap.md](../roadmap.md) 的分期，每期都必须能独立验收。
 
 | ID | 期 | 验收标准 |
 |----|----|----------|
@@ -222,7 +222,7 @@
 
 ## 9. 风险登记
 
-完整分析见 [roadmap.md §风险](roadmap.md#风险登记)。最高的三条：
+完整分析见 [roadmap.md §风险](../roadmap.md#风险登记)。最高的三条：
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
@@ -268,4 +268,4 @@
 | [bdd/](bdd/) | 每个行为**怎么验收**：Given/When/Then | 开发 / 测试 |
 | [scoring-standard.md](scoring-standard.md) | 评分**怎么算**：公式、证据等级、preset 定义 | 开发 |
 | [architecture.md](architecture.md) | 系统**长什么样**：数据流、模型、部署 | 开发 / 运维 |
-| [roadmap.md](roadmap.md) | 按什么**顺序做**、风险、开放问题 | 全部 |
+| [roadmap.md](../roadmap.md) | 按什么**顺序做**、风险、开放问题 | 全部 |
