@@ -179,11 +179,54 @@ async function renderCatalog() {
   repaint();
 }
 
+/* ---- 关于:访客落地时唯一的上下文来源。
+       没有它,页面就是一堆书名加一个没解释过的数字。 ---- */
+
+function renderAbout() {
+  app.innerHTML = `
+    <h1>关于这个站</h1>
+    <p class="prose">我有一个 2,054 本的 Calibre 技术书库。这里给里面的书打分,挑出几份书单公开出来
+      —— 站上<b>只有上过榜的那百来本</b>,全库既不展示也不提供检索。不发书,只发书单和上榜书的元数据。</p>
+
+    <h2 class="sec">书单是什么</h2>
+    <p class="prose">每份书单就是<b>一组权重</b>。同一批分数,换一组权重就是另一份榜。
+      权重直接印在书单页标题下面 —— 你看到的排名按什么算,页面上写着。</p>
+
+    <h2 class="sec">分数怎么读</h2>
+    <p class="prose">书名旁的数字(0–100)是这几个维度的加权平均:</p>
+    <table class="dims-table">
+      <thead><tr><th>维度</th><th>看的是什么</th><th>数据从哪来</th></tr></thead>
+      <tbody>
+        <tr><td>口碑</td><td>跨源评分,按评分人数做贝叶斯收缩 —— 3,000 人打的 4.5 分比 5 个人打的 5.0 分更可信</td><td>Google Books / OpenLibrary</td></tr>
+        <tr><td>技术圈声量</td><td>Hacker News 上被提到过几次,越久远的提及权重越低</td><td>HN Algolia</td></tr>
+        <tr><td>时效</td><td>按主题半衰期衰减 —— 框架书两年半、编译原理二十五年,「三年前出版」的含义完全不同</td><td>可信的出版日期</td></tr>
+        <tr><td>权威</td><td>出版社层级 × 作者是否可考</td><td>本地元数据</td></tr>
+        <tr><td>馆藏可读性</td><td>格式、封面、简介、ISBN 是否齐全</td><td>本地元数据</td></tr>
+      </tbody>
+    </table>
+    <ul class="prose">
+      <li><b>「按 4/4 维评出 · 覆盖 100%」</b> —— 某一维实在没有证据时,它不会被填一个猜出来的数,
+        而是被<b>整个移出这本书的权重</b>再重新归一。覆盖率低的书,分数是在更少的维度上算的。</li>
+      <li><b>A/B/C/D 徽章</b> —— 只表示证据有多足,<b>不参与任何准入</b>,更不是「书好不好」的评级。</li>
+      <li><b>「为什么」那一行</b> —— 上榜理由是算出来的,不是写出来的。人工置顶的书会明说「人工置顶」:
+        策展不该伪装成算法结果。</li>
+    </ul>
+    <p class="prose">分数<b>只在本库内部可比</b>。它衡量的是「在这 2,054 本里,这本书的证据有多强」,
+      不是这本书在世界上的绝对排名。</p>
+
+    <h2 class="sec">为什么搜不到某本书</h2>
+    <p class="prose">公开面 = <b>各份书单的并集</b>,不是全库目录。「上榜书目」页是这几份榜去重后的
+      总表,不是藏书清单。</p>
+    <p class="prose">有些书进不了榜是因为<b>缺证据</b>而不是因为差:一本没有 ISBN 的自出版好书拿不到
+      外部评分,就进不了要求「口碑可信」的榜。这是诚实,不是筛选。</p>`;
+}
+
 async function route() {
   const hash = location.hash || "#/";
   try {
     // 必须 await:直接 return 一个 promise 会让它的 rejection 逃出 catch,
     // 页面就永远停在"加载中"。
+    if (hash.startsWith("#/about")) return renderAbout();
     if (hash.startsWith("#/book/")) return await renderDetail(decodeURIComponent(hash.slice(7)));
     if (hash.startsWith("#/list/")) return await renderHome(decodeURIComponent(hash.slice(7)));
     if (hash.startsWith("#/catalog")) return await renderCatalog();

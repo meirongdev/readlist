@@ -46,6 +46,11 @@ li.book { background: #fff; border: 1px solid var(--line); border-radius: 10px; 
 .reason b { color: var(--fg); font-weight: 600; }
 .coverage { color: var(--muted); font-size: 12px; }
 
+/* 关于页 */
+.prose { max-width: 62ch; }
+ul.prose { padding-left: 20px; }
+ul.prose li { margin: 6px 0; }
+
 /* 详情页 */
 .detail-head h1 { margin: 0 0 4px; font-size: 22px; }
 .detail-head .sub { color: var(--muted); }
