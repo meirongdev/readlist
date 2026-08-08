@@ -24,6 +24,9 @@ env:
 jobs:
   push:
     runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -79,3 +82,57 @@ jobs:
           echo "digest: ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "把上面的 tag 或 digest 填进 homelab 仓库的 readlist.yaml。" >> "$GITHUB_STEP_SUMMARY"
+
+  # release note 的正文**就是 annotated tag 的正文** —— 不另起一份 CHANGELOG,
+  # 免得两处同源文本迟早对不上(同 SPA 那条「一个公式只留一份」的理由)。
+  # 打 tag 时把话写清楚,这里只负责搬运,外加追加一段镜像引用。
+  #
+  # 跑在 push 之后:门禁没过、镜像没推出去,就不该有一个 release 页面在那儿
+  # 宣称这一版可用。
+  release:
+    needs: push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # fetch-depth: 0 会把所有 tag 对象拉全 —— 默认的浅克隆只给出 tag 指向的
+      # commit,拿不到 annotated tag 自身的正文。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 从 tag 正文生成 release note
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAGS: ${{ needs.push.outputs.tags }}
+          DIGEST: ${{ needs.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          if [ "$(git cat-file -t "$TAG")" != "tag" ]; then
+            echo "::error::$TAG 不是 annotated tag,没有正文可用作 release note。" \
+                 "请用 git tag -a $TAG 重新打,正文写明本版改了什么、有没有 BREAKING CHANGE。"
+            exit 1
+          fi
+
+          title="$(git tag -l --format='%(contents:subject)' "$TAG")"
+          {
+            git tag -l --format='%(contents:body)' "$TAG"
+            echo
+            echo '## 镜像'
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo "digest: $DIGEST"
+            echo '```'
+            echo
+            echo '部署:把上面的 tag 或 digest 填进 [homelab](https://github.com/meirongdev/homelab) 的 `cloud/oracle/manifests/readlist.yaml`。'
+          } > notes.md
+
+          # workflow_dispatch 重跑同一个 tag 时走 edit,否则 create 会因已存在而失败。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$title" --notes-file notes.md
+          else
+            gh release create "$TAG" --title "$title" --notes-file notes.md --verify-tag
+          fi

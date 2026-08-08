@@ -147,6 +147,28 @@ HN 声量再加一批,所以首轮要 3 晚上下跑完(下一晚会自动跳过
 `C` 维从第一晚就开始积累。editions 按 pubdate 新→旧排队,新书最先拿到外部证据。
 中途看进度:`$K logs job/<name>` 里的 `缓存命中` 与 `本次预算已用完`。
 
+### 4.3 发一个新版本
+
+推 `v*` tag 即触发 `image.yml`:先跑 `make test-go`,再 buildx 推 amd64+arm64
+到 ghcr,最后按 tag 正文建 GitHub Release。
+
+```bash
+git tag -a v0.5.0        # ⚠️ 必须带 -a
+git push origin v0.5.0
+```
+
+**tag 正文就是 release note 的正文**,CI 只负责搬运并追加一段镜像 tag / digest。
+仓库里不另留一份 CHANGELOG —— 同一段话放两处,迟早对不上。所以正文要一次写够:
+这一版改了什么、有没有 `BREAKING CHANGE`(API 字段含义变化、榜单增删、
+migration)、既有部署升上来会看到什么。参照 `git show v0.4.0` 的写法。
+
+用轻量 tag(不带 `-a`)会让 release 这一步直接失败并提示重打。镜像此时已经推出去了,
+改用 `git tag -a -f v0.5.0 && git push -f origin v0.5.0` 重打同一个版本号即可,
+镜像会重推一遍(同一 commit,内容不变)。
+
+只想改 release note 的措辞、不想动镜像:同样是重打 annotated tag 再强推 ——
+release 步骤对已存在的 release 走 `gh release edit`,可以反复跑。
+
 ## 5. 上线前必须守住的红线
 
 1. ⚠️ **`pubdate` 污染**:不可信来源的书 F 记 `unknown`,**已在代码里强制**——
