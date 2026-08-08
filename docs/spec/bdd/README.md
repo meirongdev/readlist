@@ -1,7 +1,9 @@
 # BDD 规格（Gherkin）
 
-> 日期: 2026-08-04
-> 状态: 📐 行为规格（未实现），作为实现与验收的基准
+> 日期: 2026-08-04（状态更新至 2026-08-08）
+> 状态: ✅ 绝大多数场景已实现并有自动化验收 —— 行为层由 `internal/**/*_test.go` 覆盖，
+> 端到端由 [`scripts/e2e-kind.sh`](../../../scripts/e2e-kind.sh) 在真实 kind 集群上断言。
+> 本目录仍是**验收基准**：改行为先改这里，再改实现。
 > 上游: [requirements.md](../requirements.md)（需求规格）、[scoring-standard.md](../scoring-standard.md)
 
 本目录把需求与验收标准转成**行为可测**的 Gherkin 场景。每个 feature 文件对应一组用户可见
@@ -11,7 +13,7 @@
 
 | 文件 | 覆盖 | 关键需求 |
 |------|------|---------|
-| [ranking.feature](ranking.feature) | 榜单：预设切换、权重滑块、过滤、豁免、C 级不上榜 | FR-30~35, FR-40, FR-42, AC-P2/AC-P3 |
+| [ranking.feature](ranking.feature) | 榜单：预设切换、口径可见、过滤、豁免、逐本 renormalize | FR-30~35, FR-40, FR-42, AC-P2/AC-P3 |
 | [book-detail.feature](book-detail.feature) | 书详情：得分拆解、数据来源、封面外链 | FR-34, FR-45, FR-51, FR-54, NFR-11/12 |
 | [reading-status.feature](reading-status.feature) | 阅读状态：徽章、筛选、只读镜像、公开性 | FR-40~46, NFR-13/15, AC-P0 |
 | [catalog.feature](catalog.feature) | 上榜书目：公开面 = 公开榜并集、缺维度标注 | FR-25, FR-52, FR-52b, FR-33, 开放问题 Q2 |
@@ -31,6 +33,9 @@
   系统对这些依赖的**确定行为**（缓存、降级、配额停发），不描述外部本身。
 - 优先级标签：`@P0`（首版必须有）、`@P1`（首版应有）、`@P2`（可后置）。
 - 阻塞标签：`@blocked` = 依赖前置（如 Phase 1 元数据修复）完成才可验收。
+- 尚未实现的场景（**规格有、代码没有**，不是 `@blocked`，没有前置在挡）：
+  `reading-status.feature` 的「按阅读状态筛选」—— 当前前端只有书名/作者搜索与主题筛选，
+  没有按已读/未读过滤的入口。
 - 一个场景 = 一条可执行验收；与 [requirements.md §7](../requirements.md#7-验收标准) 的
   AC 一一对应，AC 是产品层验收，场景是行为层验收。
 
