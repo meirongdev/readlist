@@ -30,6 +30,13 @@ type Config struct {
 	OpenLibraryBase string
 	HNSearchBase    string
 	IngestBudget    int // 本次运行最多发多少个外部请求(配额闸门)
+	// IngestMentionsReserve 预算里给 HN 声量查询保底预留的请求数;0 = 自动(Budget/4)。
+	// editions 阶段烧到只剩保底线就让位 —— 否则 bootstrap 后的头几晚 HN 一次都
+	// 轮不到,C 维恒为 0,timeless 榜(needs C)持续为空。
+	IngestMentionsReserve int
+	// TitleWhitelistFile 主标题白名单文件路径(每行一个主标题,# 注释、空行忽略)。
+	// 主标题 ≤2 词的书默认不查 HN("Clean Code" 这类短语误认代价太高),进名单才放行。
+	TitleWhitelistFile string
 }
 
 func Load() Config {
@@ -45,11 +52,13 @@ func Load() Config {
 		SnapshotDir:      getenv("SNAPSHOT_DIR", "/data/snapshot"),
 		CalibreUserID:    getenvInt("CALIBRE_USER_ID", 1),
 
-		GoogleBooksKey:  os.Getenv("GOOGLE_BOOKS_KEY"),
-		GoogleBooksBase: getenv("GOOGLE_BOOKS_BASE", "https://www.googleapis.com/books/v1"),
-		OpenLibraryBase: getenv("OPENLIBRARY_BASE", "https://openlibrary.org"),
-		HNSearchBase:    getenv("HN_SEARCH_BASE", "https://hn.algolia.com/api/v1"),
-		IngestBudget:    getenvInt("INGEST_BUDGET", 800),
+		GoogleBooksKey:        os.Getenv("GOOGLE_BOOKS_KEY"),
+		GoogleBooksBase:       getenv("GOOGLE_BOOKS_BASE", "https://www.googleapis.com/books/v1"),
+		OpenLibraryBase:       getenv("OPENLIBRARY_BASE", "https://openlibrary.org"),
+		HNSearchBase:          getenv("HN_SEARCH_BASE", "https://hn.algolia.com/api/v1"),
+		IngestBudget:          getenvInt("INGEST_BUDGET", 800),
+		IngestMentionsReserve: getenvInt("MENTIONS_RESERVE", 0),
+		TitleWhitelistFile:    os.Getenv("TITLE_WHITELIST_FILE"),
 	}
 }
 

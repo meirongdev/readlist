@@ -141,8 +141,10 @@ $K delete job bootstrap-snapshot bootstrap-score bootstrap-ingest bootstrap-scor
 
 ### 4.2 首轮 ingest 分几晚
 
-`INGEST_BUDGET=800` 是**每次运行**的上限。全库约需 1,000–1,500 次请求,
-所以首轮要 2 晚跑完(第二晚会自动跳过已缓存的,只补没查过的)。
+`INGEST_BUDGET=800` 是**每次运行**的上限。全库 editions 约需 1,000–1,500 次请求、
+HN 声量再加一批,所以首轮要 3 晚上下跑完(下一晚会自动跳过已缓存的,只补没查过的)。
+每晚有 `MENTIONS_RESERVE`(默认 Budget/4)给 HN 保底:editions 烧到只剩保底线就让位,
+`C` 维从第一晚就开始积累。editions 按 pubdate 新→旧排队,新书最先拿到外部证据。
 中途看进度:`$K logs job/<name>` 里的 `缓存命中` 与 `本次预算已用完`。
 
 ## 5. 上线前必须守住的红线
@@ -152,7 +154,9 @@ $K delete job bootstrap-snapshot bootstrap-score bootstrap-ingest bootstrap-scor
    只有 `ingest` 拿到的 `google`/`openlibrary` 才算数(R-1)。
 2. ☠️ **绝不整库快照 `app.db`**(含密码 hash / OIDC 凭据)→ 只导出 3 张表的少数几列(NFR-13 / R-2)。
    有测试断言凭据不出现在产物里。
-3. HN 匹配「宁少不多」:精确短语 + 标题必须含书名 + ≤2 词标题需白名单 + 保留 `objectID` 可否决(R-3)。
+3. HN 匹配「宁少不多」:只查**主标题**(第一个冒号前)的精确短语 + 命中标题必须按
+   **词边界**含主标题 + 主标题 ≤2 词需白名单(`title_whitelist` 表或
+   `TITLE_WHITELIST_FILE` 主标题名单)+ 保留 `objectID` 可否决(R-3)。
 4. 只发元数据与评分,不发书;封面外链,不与私有书库跳转(NFR-12 / R-7)。
 5. **能碰 calibre 卷的容器零网络出口,能出网的容器碰不到 calibre 卷** —— 参照清单里由
    NetworkPolicy + 卷挂载分离共同保证(architecture §2)。

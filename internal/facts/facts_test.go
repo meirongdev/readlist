@@ -125,6 +125,8 @@ func newFakeAPIs(t *testing.T) *fakeAPIs {
 		f.record("hn")
 		w.Header().Set("Content-Type", "application/json")
 		query := r.URL.Query().Get("query")
+		// 记录实际发出的短语,供断言"查询用的是主标题"。
+		f.record("hnq|" + query)
 		hits := []any{}
 		add := func(id, title string, ago int) {
 			hits = append(hits, map[string]any{
@@ -138,6 +140,10 @@ func newFakeAPIs(t *testing.T) *fakeAPIs {
 			add("22001122", "Review: Designing Data-Intensive Applications (2nd ed)", 2)
 			// 这一条标题里没有书名 → 必须被"宁少不多"的规则拒掉。
 			add("99999999", "Ask HN: what database book should I read?", 1)
+		case strings.Contains(query, "The Pragmatic Programmer"):
+			add("40001111", "The Pragmatic Programmer at 25", 1)
+			// 词形差一个字母(programmers)→ 词边界匹配必须拒掉。
+			add("40002222", "The pragmatic programmers guide to hiring", 2)
 		case strings.Contains(query, "Learning Go"):
 			add("30001111", "Learning Go by Jon Bodner", 3)
 		}
@@ -482,4 +488,147 @@ func TestIngestUnlocksPublicLists(t *testing.T) {
 	reason := after.Lists["timeless"][0].Reason
 	require.NotEmpty(t, reason)
 	require.Contains(t, reason, "HN 提及", "理由串应引用刚摄入的提及证据")
+}
+
+// subtitledSnapshot 一份带副标题/短主标题形态的语料,给 v2 匹配器的测试用
+// (不动 corpusSnapshot:那份的计数断言遍布多个测试)。
+func subtitledSnapshot() *calibre.Snapshot {
+	return &calibre.Snapshot{Books: []calibre.Book{
+		// calibre 里的真实形态:主标题 + 冒号 + 长副标题。HN 帖子只写主标题。
+		{BookID: 1, Title: "Designing Data-Intensive Applications: The Big Ideas Behind Reliable, Scalable, and Maintainable Systems",
+			Authors: []string{"Martin Kleppmann"}, Publisher: "O'Reilly Media",
+			Formats: []string{"EPUB"}, Language: "eng", ISBN13: "9781449373320",
+			GoogleID: "GV-DDIA", HasCover: true, HasComments: true,
+			Pubdate: "2017-01-01", PubdateSource: calibre.SourceCalibre},
+		// 主标题只有 4 词但存在"差一个词形"的 HN 帖 → 词边界测试。
+		{BookID: 2, Title: "The Pragmatic Programmer: Your Journey to Mastery",
+			Authors: []string{"David Thomas"}, Publisher: "Addison-Wesley",
+			Formats: []string{"EPUB"}, Language: "eng", ISBN13: "9780135957059",
+			HasCover: true, Pubdate: "2019-09-13", PubdateSource: calibre.SourceCalibre},
+		// 主标题 ≤2 词 + 副标题:默认必须跳过,进白名单才查。
+		{BookID: 3, Title: "Learning Go: An Idiomatic Approach to Real-World Go Programming",
+			Authors: []string{"Jon Bodner"}, Publisher: "O'Reilly Media",
+			Formats: []string{"EPUB"}, Language: "eng", ISBN13: "9781492077213",
+			HasCover: true, Pubdate: "2021-03-16", PubdateSource: calibre.SourceCalibre},
+	}}
+}
+
+func newDBWith(t *testing.T, snap *calibre.Snapshot) *store.DB {
+	t.Helper()
+	db, err := store.Open(t.TempDir() + "/facts.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = corpus.Import(db, snap, now)
+	require.NoError(t, err)
+	return db
+}
+
+// TestIngestMatchesHNByMainTitle 回归:带副标题的书名必须按主标题查询与匹配。
+// v1 匹配器拿整名(含副标题)做短语匹配,生产环境跑了三天 C 维 measured 恒为 0。
+func TestIngestMatchesHNByMainTitle(t *testing.T) {
+	f := newFakeAPIs(t)
+	db := newDBWith(t, subtitledSnapshot())
+	st, err := facts.Ingest(db, f.cfg(100))
+	require.NoError(t, err)
+
+	// 发出的查询必须是主标题短语,不带副标题。
+	require.Positive(t, f.count(`hnq|"Designing Data-Intensive Applications"`),
+		"HN 查询应当只用主标题")
+
+	ids := []string{}
+	rows, err := db.SQL().Query(`SELECT object_id FROM mentions ORDER BY object_id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	require.Contains(t, ids, "15428526")
+	require.Contains(t, ids, "22001122")
+	require.Contains(t, ids, "40001111", "主标题按词边界出现的 story 应被接受")
+	require.NotContains(t, ids, "40002222", "词形不同(programmers)必须被词边界规则拒掉")
+	require.NotContains(t, ids, "99999999")
+
+	// "Learning Go: An Idiomatic Approach…" 主标题只有 2 词 → 默认跳过。
+	require.Equal(t, 1, st.SkippedShortTitle)
+}
+
+// TestIngestShortMainTitleQueriedWhenFileWhitelisted 主标题白名单(文件挂载)放行短标题。
+func TestIngestShortMainTitleQueriedWhenFileWhitelisted(t *testing.T) {
+	f := newFakeAPIs(t)
+	db := newDBWith(t, subtitledSnapshot())
+	cfg := f.cfg(100)
+	cfg.WhitelistMainTitles = []string{"Learning Go"}
+	st, err := facts.Ingest(db, cfg)
+	require.NoError(t, err)
+
+	require.Zero(t, st.SkippedShortTitle, "白名单里的短主标题应该被查")
+	var n int
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT COUNT(*) FROM mentions WHERE object_id='30001111'`).Scan(&n))
+	require.Equal(t, 1, n, "白名单放行后应拿到 Learning Go 的提及")
+}
+
+// TestIngestReQueriesHNWhenMatcherVersionChanges 匹配器升级后,旧版本的查询标记
+// 必须自动视为过期并重查 —— 否则修复要等 30 天 TTL 走完才生效。
+func TestIngestReQueriesHNWhenMatcherVersionChanges(t *testing.T) {
+	f := newFakeAPIs(t)
+	db := newDBWith(t, subtitledSnapshot())
+	_, err := facts.Ingest(db, f.cfg(100))
+	require.NoError(t, err)
+
+	// 伪造 v1 时代的状态:标记还在 TTL 内但没有 matcher 字段,且当时 0 命中。
+	_, err = db.SQL().Exec(
+		`UPDATE evidence SET payload='{"found":true,"raw_hits":3,"accepted":0}' WHERE source='hn_search'`)
+	require.NoError(t, err)
+	_, err = db.SQL().Exec(`DELETE FROM mentions`)
+	require.NoError(t, err)
+
+	hnBefore := f.count("hn")
+	st, err := facts.Ingest(db, f.cfg(100))
+	require.NoError(t, err)
+	require.Greater(t, f.count("hn"), hnBefore, "旧版本标记必须触发重查,即使 TTL 未过")
+	require.Positive(t, st.MentionsFound)
+
+	var n int
+	require.NoError(t, db.SQL().QueryRow(`SELECT COUNT(*) FROM mentions`).Scan(&n))
+	require.Positive(t, n, "重查后提及必须重新落库")
+}
+
+// TestIngestReservesBudgetForMentions editions 阶段必须给 HN 留出保底预算:
+// 没有保底时,editions(每版次最多 3 次请求)会把预算烧光,bootstrap 后的头几晚
+// HN 一次都轮不到 —— C 维在证据最饥渴的窗口期恒为 0(2026-08 生产实测)。
+func TestIngestReservesBudgetForMentions(t *testing.T) {
+	f := newFakeAPIs(t)
+	db := newDB(t) // 4 本有标识符的书,全查需要 ~7 次请求
+	cfg := f.cfg(8)
+	cfg.MentionsReserve = 2
+	st, err := facts.Ingest(db, cfg)
+	require.NoError(t, err)
+
+	require.True(t, st.BudgetExhausted, "editions 尚未查完,应标记预算耗尽")
+	require.Positive(t, st.MentionsFound,
+		"预算紧张的晚上 HN 也必须分到保底配额(这正是 C 维恒 0 的修复)")
+	require.LessOrEqual(t, st.Requests, 8)
+}
+
+// TestIngestPrefersNewBooksFirst editions 按 pubdate 新→旧查:fresh-releases 的
+// 准入完全依赖外部 pubdate,追赶期里新书必须最先拿到证据。
+func TestIngestPrefersNewBooksFirst(t *testing.T) {
+	f := newFakeAPIs(t)
+	db := newDB(t)
+	// 预算只够查第一本书(google + openlibrary 两跳)。
+	st, err := facts.Ingest(db, f.cfg(2))
+	require.NoError(t, err)
+	require.True(t, st.BudgetExhausted)
+
+	// 2024 年的 Learning Go 2nd(book 3)是最新的,必须最先被查。
+	var src string
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT COALESCE(pubdate_source,'') FROM editions WHERE book_id=3`).Scan(&src))
+	require.Equal(t, "google", src, "最新出版的书应最先拿到外部 pubdate")
+	// 最老的 DDIA(2017)这一轮还轮不到。
+	require.Zero(t, queryOne[int](t, db,
+		`SELECT COUNT(*) FROM evidence WHERE source='google_query' AND source_id='isbn:9781449373320'`))
 }

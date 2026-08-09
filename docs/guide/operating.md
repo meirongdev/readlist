@@ -61,8 +61,10 @@ make smoke        # 或:DB_PATH=... ./bin/readlist dryrun
 | 症状 | 多半是 |
 |------|--------|
 | 某维 measured 比例是 **0%** | 这一维没有数据源。`D`/`P` 恒为 0，见 §3 |
+| **`C` 维一直是 0** | 主标题 ≤2 词的书不查 HN（宁少不多），需要进白名单（`title_whitelist` 表或 `TITLE_WHITELIST_FILE`）；再查 ingest 是不是每晚预算都被 editions 烧光（`MENTIONS_RESERVE` 保底，默认 Budget/4） |
 | 某维比例很低，榜也空 | `needs` 卡住了。放宽 `needs`，或先补证据（跑 `ingest`） |
 | 各维都正常但榜仍空 | `filters` 太严（`min_age_years` / `pubdate_within_months` / `read_status`） |
+| **`F` 维隔夜骤降** | snapshot 覆写了外部 pubdate —— 这是修过的回归（`resolveExternalCarryOver`），看 snapshot 日志里的「外部 pubdate 保留: N」，N 掉回 0 就是它又回来了 |
 | 只选出两三本 | `max_per_topic` / `max_per_author` 的多样性上限咬住了 |
 | 数量对但排序不对 | 这才是权重的事 |
 
@@ -111,8 +113,11 @@ make pipeline SOURCE_METADATA_DB=/path/to/metadata.db SOURCE_APP_DB=/path/to/app
 ⚠️ **上线前必须配 `GOOGLE_BOOKS_KEY`。** Google Books 的匿名配额按共享项目计，
 一次探测请求就能直接拿到 429，届时口碑与时效两维基本拿不到数据。
 
-⚠️ 首轮 `ingest` 要跑两晚。`INGEST_BUDGET=800` 是**每次运行**的上限，全库约需
-1,000–1,500 次请求；第二晚会自动跳过已缓存的。
+⚠️ 首轮 `ingest` 要跑几晚。`INGEST_BUDGET=800` 是**每次运行**的上限，全库
+editions 约需 1,000–1,500 次请求、HN 声量再加一批；下一晚会自动跳过已缓存的。
+每晚有 `MENTIONS_RESERVE`（默认 Budget/4）给 HN 保底 —— editions 烧到只剩保底线
+就让位，所以 `C` 维从第一晚就开始积累，不用等 editions 全部查完。
+editions 按 **pubdate 新→旧**排队：新书最先拿到外部证据，「近一年新书」榜最先受益。
 
 ## 5. 补录阅读状态
 

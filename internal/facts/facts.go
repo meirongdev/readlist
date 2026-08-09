@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/meirongdev/readlist/internal/corpus"
 	"github.com/meirongdev/readlist/internal/store"
 )
 
@@ -35,6 +36,15 @@ type Config struct {
 	GoogleKey       string
 	// Budget 本次运行最多发多少个外部请求。打满就干净停下,下次接着跑(NFR-9)。
 	Budget int
+	// MentionsReserve 从预算里给 HN 声量查询保底预留的请求数。没有它,editions
+	// 阶段(每个版次最多 3 次请求)会把整个预算烧完,HN 在 bootstrap 后的头几晚
+	// 一次都轮不到 —— C 维在证据最饥渴的窗口期恒为 0,timeless 榜(needs C)持续为空。
+	// 0 = 取 Budget/4;Budget 不限(≤0)时不预留。
+	MentionsReserve int
+	// WhitelistMainTitles 主标题白名单(主标题 ≤2 词的书默认不查 HN,命中白名单才查)。
+	// 与 title_whitelist 表(work_id 键,会随聚类漂移)互补:这份按**规范化主标题**
+	// 匹配,由部署方从文件挂进来,book id / work id 漂移都不影响它。
+	WhitelistMainTitles []string
 	// Sleep 请求之间的最小间隔(礼貌限速;OpenLibrary 建议 0.5s,HN 建议 ≤10 rps)。
 	Sleep time.Duration
 	// RatingsTTLDays 评分类 30 天,MetaTTLDays 元数据类 180 天(architecture §5)。
@@ -66,10 +76,14 @@ type Ingester struct {
 	cfg    Config
 	client *client
 	stats  Stats
+	// mentionsReserve editions 阶段必须给 mentions 留出的预算(见 Config.MentionsReserve)。
+	mentionsReserve int
 	// fresh 记录已缓存且未过期的 (source, source_id)。
 	fresh map[string]bool
 	// whitelist ≤2 词标题的人工白名单(title_whitelist 表)。
 	whitelist map[string]bool
+	// titleAllow 主标题白名单(规范化主标题 → 放行),来自 Config.WhitelistMainTitles。
+	titleAllow map[string]bool
 	// olWorkIDs work_id → OpenLibrary work id(第一跳的结果)。
 	// 有了它,「ISBN→work 映射还新鲜、但评分已过期」时可以只重发第二跳。
 	olWorkIDs map[string]string
@@ -89,10 +103,24 @@ func Ingest(d *store.DB, cfg Config) (Stats, error) {
 	}
 	i := &Ingester{
 		db: d, cfg: cfg,
-		client:    newClient(cfg.Budget, cfg.Sleep),
-		fresh:     map[string]bool{},
-		whitelist: map[string]bool{},
-		olWorkIDs: map[string]string{},
+		client:     newClient(cfg.Budget, cfg.Sleep),
+		fresh:      map[string]bool{},
+		whitelist:  map[string]bool{},
+		titleAllow: map[string]bool{},
+		olWorkIDs:  map[string]string{},
+	}
+	switch {
+	case cfg.Budget <= 0:
+		i.mentionsReserve = 0 // 预算不限,不存在"轮不到"的问题
+	case cfg.MentionsReserve <= 0:
+		i.mentionsReserve = cfg.Budget / 4
+	default:
+		i.mentionsReserve = cfg.MentionsReserve
+	}
+	for _, t := range cfg.WhitelistMainTitles {
+		if k := normalizeForMatch(mainTitle(t)); k != "" {
+			i.titleAllow[k] = true
+		}
 	}
 	err := i.ingest()
 	i.stats.Requests = i.client.used
@@ -142,20 +170,25 @@ func (i *Ingester) writeRun(runErr error) error {
 // loadCacheState 读出还新鲜的缓存键与人工白名单。
 func (i *Ingester) loadCacheState() error {
 	rows, err := i.db.SQL().Query(
-		`SELECT source, source_id, COALESCE(fetched_at,''), COALESCE(ttl_days,0) FROM evidence`)
+		`SELECT source, source_id, COALESCE(fetched_at,''), COALESCE(ttl_days,0),
+		        COALESCE(payload,'') FROM evidence`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var source, sourceID, fetchedAt string
+		var source, sourceID, fetchedAt, payload string
 		var ttl int
-		if err := rows.Scan(&source, &sourceID, &fetchedAt, &ttl); err != nil {
+		if err := rows.Scan(&source, &sourceID, &fetchedAt, &ttl, &payload); err != nil {
 			return err
 		}
 		t, err := time.Parse(time.RFC3339, fetchedAt)
 		if err != nil {
 			continue // 时间戳坏了就当过期,重取一次比信一个坏值安全
+		}
+		// HN 标记还要匹配器版本对得上:旧规则下的「查过且 0 命中」不可信,视为过期。
+		if source == sourceHN && !hnMarkerCurrent(payload) {
+			continue
 		}
 		if t.AddDate(0, 0, ttl).After(i.cfg.Now) {
 			i.fresh[source+"\x1f"+sourceID] = true
@@ -201,6 +234,14 @@ func (i *Ingester) isFresh(source, sourceID string) bool {
 	return i.fresh[source+"\x1f"+sourceID]
 }
 
+// hnMarkerCurrent 该 HN 查询标记是否出自当前版本的匹配器。
+func hnMarkerCurrent(payload string) bool {
+	var m struct {
+		Matcher int `json:"matcher"`
+	}
+	return json.Unmarshal([]byte(payload), &m) == nil && m.Matcher == hnMatcherVersion
+}
+
 // candidate 一个待查的版次。标识符是**逐版次**的,所以外部查询也按版次发;
 // 但评分在 work 级汇总(engine 的 acclaim 会把 Σ 人数加起来)。
 type candidate struct {
@@ -213,10 +254,14 @@ type candidate struct {
 }
 
 func (i *Ingester) ingestEditions() error {
+	// 新书优先:fresh-releases 的准入(needs F: measured)完全依赖外部 pubdate,
+	// 而按 book_id 升序等于"最老的先查"——新入库的书(大概率也是新出版的)排在队尾,
+	// bootstrap 追赶期它们最后才拿到证据,新书榜在最需要它的窗口期一直是空的。
+	// 无日期的排最后;mtime 污染的日期看起来"新",被优先查到反而正好修正它。
 	rows, err := i.db.SQL().Query(`SELECT e.book_id, e.work_id, e.title,
 			COALESCE(w.first_author,''), COALESCE(e.isbn13,''), COALESCE(e.google_volume_id,'')
 		FROM editions e JOIN works w USING(work_id)
-		ORDER BY e.book_id`)
+		ORDER BY (COALESCE(e.pubdate,'')=''), e.pubdate DESC, e.book_id DESC`)
 	if err != nil {
 		return err
 	}
@@ -236,6 +281,14 @@ func (i *Ingester) ingestEditions() error {
 	rows.Close()
 
 	for _, c := range cands {
+		// 给 mentions 留出保底预算再停:editions 没查完的明晚接着补,
+		// 但 HN 一晚都不能再空着(C 维恒 0 的教训)。
+		if i.client.remaining() <= i.mentionsReserve {
+			i.stats.BudgetExhausted = true
+			slog.Info("editions 预算用到保底线,让位给 mentions,下次运行继续",
+				"used", i.client.used, "reserve", i.mentionsReserve)
+			return nil
+		}
 		i.stats.EditionsSeen++
 		if c.ISBN13 == "" && c.GoogleID == "" {
 			// 约 1,000–1,300 本既无 ISBN 也无 google id(实测)。用标题搜索去猜
@@ -248,11 +301,6 @@ func (i *Ingester) ingestEditions() error {
 		}
 		if err := i.fetchOpenLibraryFor(c); err != nil && !i.tolerable(err) {
 			return err
-		}
-		if i.client.remaining() == 0 {
-			i.stats.BudgetExhausted = true
-			slog.Info("ingest 预算用完,下次运行继续", "used", i.client.used)
-			return nil
 		}
 	}
 	return nil
@@ -457,9 +505,11 @@ func (i *Ingester) ingestMentions() error {
 			i.stats.BudgetExhausted = true
 			return nil
 		}
-		// ≤2 词的标题不查:"Go"、"Rust" 这类会把 HN 首页整片认成提及(R-3)。
-		// 要查就得先进人工白名单。
-		if titleWordCount(w.title) <= 2 && !i.whitelist[w.id] {
+		// **主标题** ≤2 词的不查:"Go"、"Clean Code" 这类短语会把 HN 整片误认成
+		// 提及(R-3)。要查得先进白名单 —— title_whitelist 表(work_id 键)或
+		// 部署方挂进来的主标题白名单文件,两者任一命中即放行。
+		if titleWordCount(mainTitle(w.title)) <= 2 &&
+			!i.whitelist[w.id] && !i.titleAllow[normalizeForMatch(mainTitle(w.title))] {
 			i.stats.SkippedShortTitle++
 			continue
 		}
@@ -476,8 +526,16 @@ func (i *Ingester) ingestMentions() error {
 			continue
 		}
 		hits := matchHN(w.title, res, i.cfg.Now)
-		marker := map[string]any{"found": found, "raw_hits": res.NbHits, "accepted": len(hits)}
+		// matcher 版本写进标记:规则升级后旧标记自动视为过期(见 hnMatcherVersion)。
+		marker := map[string]any{"found": found, "raw_hits": res.NbHits,
+			"accepted": len(hits), "matcher": hnMatcherVersion}
 		if err := i.putEvidence(sourceHN, w.id, w.id, marker, i.cfg.RatingsTTLDays); err != nil {
+			return err
+		}
+		// 命中集合整组替换:查询结果就是当下的真相,旧规则认下的命中不该残留。
+		// 人工否决在 mention_overrides 表,按 (work_id, object_id) 在读取端生效,
+		// 不受这次重写影响。
+		if _, err := i.db.SQL().Exec(`DELETE FROM mentions WHERE work_id=?`, w.id); err != nil {
 			return err
 		}
 		for _, m := range hits {
@@ -508,21 +566,10 @@ func (i *Ingester) putEvidence(source, sourceID, workID string, payload any, ttl
 	return nil
 }
 
-// pubdateSourcePriority 出版日期来源的优先级(数字大 = 更可信/更精确)。
-//
-// 没有这条优先级,当晚的结果就取决于源的遍历顺序:OpenLibrary 给的是自由文本日期
-// (实测形如 "Apr 02, 2017"),会盖掉 Google 更精确的 "2017-03-16"。
-var pubdateSourcePriority = map[string]int{
-	"google":         5,
-	"openlibrary":    4,
-	"file-meta":      3,
-	"calibre":        2,
-	"mtime-fallback": 1,
-	"unknown":        0,
-	"":               0,
-}
-
 // writePubdate 用外部日期覆盖该版次的 pubdate,并记下真实来源。
+// 优先级用 corpus.PubdateSourcePriority(与 snapshot 同一份):没有这条优先级,
+// 当晚的结果就取决于源的遍历顺序 —— OpenLibrary 给的是自由文本日期
+// (实测形如 "Apr 02, 2017"),会盖掉 Google 更精确的 "2017-03-16"。
 //
 // 这一步做完,时效维度才第一次真正有判别力 —— 而它完全不需要动 calibre 的库
 // (review M2:readlist 要的是"自己表里有个带来源的 pubdate")。
@@ -534,7 +581,7 @@ func (i *Ingester) writePubdate(bookID int, date, source string) error {
 	if err != nil {
 		return fmt.Errorf("读 pubdate book=%d: %w", bookID, err)
 	}
-	if pubdateSourcePriority[source] < pubdateSourcePriority[curSource] {
+	if corpus.PubdateSourcePriority[source] < corpus.PubdateSourcePriority[curSource] {
 		return nil // 已有更可信的来源,不降级
 	}
 	if curDate == date && curSource == source {

@@ -126,6 +126,28 @@ func olWorkID(key string) string {
 
 // ---------- HN Algolia ----------
 
+// hnMatcherVersion HN 匹配规则的版本号,写进每条 hn_search 查询标记。
+// loadCacheState 只认当前版本的标记为新鲜:匹配规则一变,旧的「查过且 0 命中」
+// 结论就不可信,必须自动重查 —— 否则修复要等 30 天 TTL 走完才生效。
+//
+//	v1  完整书名(含副标题)做精确短语查询与包含匹配。上线三天 C 维 measured
+//	    恒为 0:calibre 书名普遍形如 "Main Title: Long Subtitle …",HN 帖子
+//	    只写主标题,整名短语在数学上不可能命中。
+//	v2  只用主标题(第一个冒号之前)查询与匹配,且匹配按词边界。
+const hnMatcherVersion = 2
+
+// mainTitle 主标题:第一个副标题分隔符(半/全角冒号)之前的部分。
+// 查询、匹配、词数门槛全部以它为准 —— 副标题只存在于书脊上,不存在于讨论里。
+func mainTitle(title string) string {
+	t := title
+	for _, sep := range []string{":", "："} {
+		if i := strings.Index(t, sep); i >= 0 {
+			t = t[:i]
+		}
+	}
+	return strings.TrimSpace(t)
+}
+
 type hnSearch struct {
 	NbHits int `json:"nbHits"`
 	Hits   []struct {
@@ -137,9 +159,10 @@ type hnSearch struct {
 }
 
 func (i *Ingester) hnSearchURL(title string) string {
-	// 精确短语查询:加引号让 Algolia 按短语而不是分词匹配。
+	// 精确短语查询:加引号让 Algolia 按短语而不是分词匹配。只查主标题 ——
+	// 带上副标题的整名短语在 HN 帖子标题里几乎不可能出现(hnMatcherVersion v1 的教训)。
 	q := url.Values{
-		"query":       {`"` + title + `"`},
+		"query":       {`"` + mainTitle(title) + `"`},
 		"tags":        {"story"},
 		"hitsPerPage": {"50"},
 	}
@@ -156,12 +179,13 @@ type hnMention struct {
 // matchHN 把搜索结果过成"宁少不多"的命中集合(R-3)。
 //
 // 三条规则,每条都为了少认而不是多认:
-//   - 标题 ≤2 词的书**根本不查**(除非在人工白名单里):"Go"、"Rust" 这类
+//   - **主标题** ≤2 词的书**根本不查**(除非在人工白名单里):"Go"、"Rust" 这类
 //     标题会把整个 HN 首页认成提及;
-//   - 命中的 story 标题必须**包含**规范化后的书名(不是反过来);
+//   - 命中的 story 标题必须按**词边界包含**规范化后的主标题(不是反过来):
+//     "clean codebase" 不算提到了 "Clean Code";
 //   - 保留 objectID,人工可以逐条否决(mention_overrides 的入口)。
 func matchHN(bookTitle string, res hnSearch, now time.Time) []hnMention {
-	want := normalizeForMatch(bookTitle)
+	want := normalizeForMatch(mainTitle(bookTitle))
 	if want == "" {
 		return nil
 	}
@@ -170,16 +194,25 @@ func matchHN(bookTitle string, res hnSearch, now time.Time) []hnMention {
 		if h.ObjectID == "" || h.Title == "" {
 			continue
 		}
-		if !strings.Contains(normalizeForMatch(h.Title), want) {
+		if !containsPhrase(normalizeForMatch(h.Title), want) {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339, h.CreatedAt)
 		if err != nil || t.After(now) {
 			continue
 		}
-		out = append(out, hnMention{ObjectID: h.ObjectID, CreatedAt: t, MatchedBy: "exact-title-phrase"})
+		out = append(out, hnMention{ObjectID: h.ObjectID, CreatedAt: t, MatchedBy: "main-title-phrase"})
 	}
 	return out
+}
+
+// containsPhrase 词边界包含。两个入参都必须是 normalizeForMatch 的产物
+// (小写、单空格分词),所以补一层空格再 Contains 就是词边界语义。
+func containsPhrase(haystack, phrase string) bool {
+	if phrase == "" {
+		return false
+	}
+	return strings.Contains(" "+haystack+" ", " "+phrase+" ")
 }
 
 // titleWordCount 规范化后的词数,用于"≤2 词必须白名单"的判定。

@@ -97,14 +97,21 @@ func run() error {
 
 	case "ingest":
 		// 唯一发起网络请求的命令。配额打满就干净停下,下次接着跑。
+		whitelist, err := loadTitleWhitelist(cfg.TitleWhitelistFile)
+		if err != nil {
+			// 配了文件却读不到必须大声失败:静默跳过等于白名单永远"看起来生效了"。
+			return fmt.Errorf("ingest: 读主标题白名单 %s: %w", cfg.TitleWhitelistFile, err)
+		}
 		st, err := facts.Ingest(db, facts.Config{
-			GoogleBase:      cfg.GoogleBooksBase,
-			OpenLibraryBase: cfg.OpenLibraryBase,
-			HNBase:          cfg.HNSearchBase,
-			GoogleKey:       cfg.GoogleBooksKey,
-			Budget:          cfg.IngestBudget,
-			Sleep:           500 * time.Millisecond, // OpenLibrary 建议的礼貌间隔
-			Now:             time.Now().UTC(),
+			GoogleBase:          cfg.GoogleBooksBase,
+			OpenLibraryBase:     cfg.OpenLibraryBase,
+			HNBase:              cfg.HNSearchBase,
+			GoogleKey:           cfg.GoogleBooksKey,
+			Budget:              cfg.IngestBudget,
+			MentionsReserve:     cfg.IngestMentionsReserve,
+			WhitelistMainTitles: whitelist,
+			Sleep:               500 * time.Millisecond, // OpenLibrary 建议的礼貌间隔
+			Now:                 time.Now().UTC(),
 		})
 		// 即使出错也把已拿到的统计打出来 —— 部分成功是这条管道的常态。
 		printIngestSummary(st)
@@ -154,6 +161,27 @@ func newEngine(cfg config.Config, db *store.DB) *score.Engine {
 	return eng
 }
 
+// loadTitleWhitelist 读主标题白名单文件:每行一个主标题,# 注释与空行忽略。
+// 未配置(路径为空)时返回 nil —— 白名单是可选的。
+func loadTitleWhitelist(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out, nil
+}
+
 func publishedRunID(db *store.DB) (string, error) {
 	var runID string
 	err := db.SQL().QueryRow(`SELECT run_id FROM published_run WHERE id=1`).Scan(&runID)
@@ -177,6 +205,9 @@ func printSnapshotSummary(st corpus.ImportStats) {
 	fmt.Printf("  ⚠️ 孤儿行(book id 漂移): %d\n", st.OrphanRows)
 	fmt.Printf("  ⚠️ pubdate 判为 mtime 兜底: %d;缺失/占位: %d —— 这些书的时效维度记 unknown\n",
 		st.PubdateSuspect, st.PubdateUnknown)
+	// ingest 追平后这个数应≈外部 pubdate 总数;掉回 0 = 覆写回归,F 维一天内归零。
+	fmt.Printf("  外部 pubdate 保留: %d 条(google/openlibrary 优先级高于快照值)\n",
+		st.PubdatePreserved)
 }
 
 func printIngestSummary(st facts.Stats) {

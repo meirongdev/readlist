@@ -21,7 +21,11 @@ type ImportStats struct {
 	OrphanRows     int `json:"orphan_rows"`     // app.db 里 join 不上书目的行 —— book id 漂移
 	PubdateSuspect int `json:"pubdate_suspect"` // 判为 mtime 兜底的书数
 	PubdateUnknown int `json:"pubdate_unknown"` // 缺失或占位值
-	Publishers     int `json:"publishers"`
+	// PubdatePreserved 保住的外部 pubdate 数(ingest 写入的 google/openlibrary 日期,
+	// 优先级高于本次快照的 calibre 值)。ingest 追平之后它应≈全部外部覆盖数;
+	// 骤降到 0 说明覆写回归又回来了 —— F 维会在一天内跟着归零。
+	PubdatePreserved int `json:"pubdate_preserved"`
+	Publishers       int `json:"publishers"`
 	// PublisherOverrides 命中人工归一表的版次数(publisher_map 里 source='manual' 的行)。
 	PublisherOverrides int `json:"publisher_overrides"`
 	RunID              string
@@ -85,16 +89,22 @@ func Import(d *store.DB, snap *calibre.Snapshot, now time.Time) (ImportStats, er
 	defer tx.Rollback()
 
 	// ---- 全量替换 editions / works ----
+	// 「全量替换」对 pubdate 与 google_volume_id 有一个例外:其余列都是 calibre 的
+	// 派生物,但这两列可能已被 ingest 用外部证据升级过 —— 那是烧配额换来的,而且
+	// ingest 对已缓存的书**不会**重写(缓存命中直接短路)。这里若无条件覆写,
+	// 外部日期活不过下一次快照,F 维的实测覆盖每天归零(2026-08-08 实测:338 → 0)。
+	// 所以先读出旧行,upsert 时按 PubdateSourcePriority 决定去留。
+	prev, err := scanPrevEditions(tx)
+	if err != nil {
+		return st, err
+	}
+
 	// 先删掉快照里已经不存在的 edition,再 upsert。顺序反了会把刚写的删掉。
 	keep := make(map[int]bool, len(books))
 	for _, b := range books {
 		keep[b.BookID] = true
 	}
-	existing, err := scanInts(tx, `SELECT book_id FROM editions`)
-	if err != nil {
-		return st, err
-	}
-	for _, id := range existing {
+	for id := range prev {
 		if !keep[id] {
 			if _, err := tx.Exec(`DELETE FROM editions WHERE book_id=?`, id); err != nil {
 				return st, fmt.Errorf("删除失效 edition %d: %w", id, err)
@@ -181,10 +191,11 @@ func Import(d *store.DB, snap *calibre.Snapshot, now time.Time) (ImportStats, er
 		if b.PubdateSource == calibre.SourceUnknown {
 			st.PubdateUnknown++
 		}
+		pd, pdSrc, gid := resolveExternalCarryOver(prev[b.BookID], &b, &st)
 		if _, err := edStmt.Exec(b.BookID, bookWork[b.BookID], b.Title,
-			nullable(b.ISBN13), nullable(b.GoogleID), nullable(b.Publisher), pi.Norm,
+			nullable(b.ISBN13), nullable(gid), nullable(b.Publisher), pi.Norm,
 			bestFormat(b.Formats), b.Language, boolInt(b.HasComments), boolInt(b.HasCover),
-			nullable(b.Pubdate), b.PubdateSource, nullableFloat(b.RatingStars)); err != nil {
+			nullable(pd), pdSrc, nullableFloat(b.RatingStars)); err != nil {
 			return st, fmt.Errorf("写 edition %d: %w", b.BookID, err)
 		}
 		st.Editions++
@@ -313,21 +324,55 @@ func loadManualPublishers(tx *sql.Tx) (map[string]PublisherInfo, error) {
 	return out, rows.Err()
 }
 
-func scanInts(tx *sql.Tx, query string) ([]int, error) {
-	rows, err := tx.Query(query)
+// prevEdition 上一次快照后该版次的存量行(外部证据去留判定用)。
+type prevEdition struct {
+	pubdate, pubdateSource, isbn13, googleID string
+}
+
+func scanPrevEditions(tx *sql.Tx) (map[int]prevEdition, error) {
+	rows, err := tx.Query(`SELECT book_id, COALESCE(pubdate,''), COALESCE(pubdate_source,''),
+		COALESCE(isbn13,''), COALESCE(google_volume_id,'') FROM editions`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []int
+	out := map[int]prevEdition{}
 	for rows.Next() {
-		var v int
-		if err := rows.Scan(&v); err != nil {
+		var id int
+		var p prevEdition
+		if err := rows.Scan(&id, &p.pubdate, &p.pubdateSource, &p.isbn13, &p.googleID); err != nil {
 			return nil, err
 		}
-		out = append(out, v)
+		out[id] = p
 	}
 	return out, rows.Err()
+}
+
+// resolveExternalCarryOver 决定本次快照写入的 pubdate/pubdate_source/google_volume_id:
+// 默认取快照(calibre)值;当旧行的 pubdate 来源优先级**更高**(google/openlibrary
+// 是 ingest 烧配额查回来的)时保留旧值,同优先级取快照值(跟进 calibre 自己的修订)。
+// ingest 写回的 volume id 同理保留 —— 它让后续摄入能直取 volume、评分行能解析回 work。
+//
+// 唯一不保留的情形:版次的外部标识变了(ISBN,或无 ISBN 时的 google id)。
+// 那说明这本书被重新识别过 —— 旧外部证据是按旧标识查的,出处已失效,宁可重查。
+func resolveExternalCarryOver(prev prevEdition, b *calibre.Book, st *ImportStats) (pubdate, source, googleID string) {
+	pubdate, source, googleID = b.Pubdate, b.PubdateSource, strings.TrimSpace(b.GoogleID)
+	isbn := strings.TrimSpace(b.ISBN13)
+	sameIdentity := prev.isbn13 == isbn
+	if isbn == "" {
+		sameIdentity = sameIdentity && prev.googleID == googleID
+	}
+	if !sameIdentity {
+		return pubdate, source, googleID
+	}
+	if PubdateSourcePriority[prev.pubdateSource] > PubdateSourcePriority[source] {
+		pubdate, source = prev.pubdate, prev.pubdateSource
+		st.PubdatePreserved++
+	}
+	if googleID == "" {
+		googleID = prev.googleID
+	}
+	return pubdate, source, googleID
 }
 
 func nullable(s string) any {

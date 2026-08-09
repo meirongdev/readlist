@@ -277,3 +277,57 @@ func TestSnapshotDataScoresEndToEnd(t *testing.T) {
 	// 交付不了任何东西,选材约束与理由串也就无从调试。
 	require.NotEmpty(t, res.Lists["library-hygiene"])
 }
+
+// TestImportPreservesExternalPubdate 回归:快照不得覆写 ingest 用外部证据升级过的
+// pubdate。2026-08-08 实测事故:google 日期活不过次日凌晨的快照,F 维实测覆盖
+// 338 → 0,「近一年新书」榜因此结构性为空(ingest 对已缓存的书不会重写日期)。
+func TestImportPreservesExternalPubdate(t *testing.T) {
+	db := openDB(t)
+	_, err := corpus.Import(db, fixtureSnapshot(), importNow)
+	require.NoError(t, err)
+
+	// 模拟 ingest:book 1 的 pubdate 被 google 升级;book 2(calibre 无 google id)
+	// 被写回了 ISBN 查询命中的 volume id。
+	_, err = db.SQL().Exec(
+		`UPDATE editions SET pubdate='2017-04-02', pubdate_source='google' WHERE book_id=1`)
+	require.NoError(t, err)
+	_, err = db.SQL().Exec(
+		`UPDATE editions SET google_volume_id='GV-LEARNGO' WHERE book_id=2`)
+	require.NoError(t, err)
+
+	// 次日快照,calibre 侧没有任何变化。
+	st, err := corpus.Import(db, fixtureSnapshot(), importNow.AddDate(0, 0, 1))
+	require.NoError(t, err)
+	require.Equal(t, 1, st.PubdatePreserved)
+
+	var pd, src string
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT pubdate, pubdate_source FROM editions WHERE book_id=1`).Scan(&pd, &src))
+	require.Equal(t, "google", src, "外部来源优先级更高,快照不得降级")
+	require.Equal(t, "2017-04-02", pd)
+
+	var gid string
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT COALESCE(google_volume_id,'') FROM editions WHERE book_id=2`).Scan(&gid))
+	require.Equal(t, "GV-LEARNGO", gid, "ingest 写回的 volume id 不得被快照抹掉")
+
+	// calibre 自己的修订(低→同优先级)照常跟进:book 4 从 mtime 兜底修成了真日期。
+	snap := fixtureSnapshot()
+	snap.Books[3].Pubdate, snap.Books[3].PubdateSource = "2020-01-01", calibre.SourceCalibre
+	_, err = corpus.Import(db, snap, importNow.AddDate(0, 0, 2))
+	require.NoError(t, err)
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT pubdate, pubdate_source FROM editions WHERE book_id=4`).Scan(&pd, &src))
+	require.Equal(t, calibre.SourceCalibre, src)
+	require.Equal(t, "2020-01-01", pd)
+
+	// ISBN 变了 = 这本书被重新识别过,旧外部证据是按旧标识查的 → 不保留,回到快照值。
+	snap2 := fixtureSnapshot()
+	snap2.Books[0].ISBN13 = "9781098119058"
+	_, err = corpus.Import(db, snap2, importNow.AddDate(0, 0, 3))
+	require.NoError(t, err)
+	require.NoError(t, db.SQL().QueryRow(
+		`SELECT pubdate, pubdate_source FROM editions WHERE book_id=1`).Scan(&pd, &src))
+	require.Equal(t, calibre.SourceCalibre, src, "标识变更后不得沿用旧标识查来的日期")
+	require.Equal(t, "2017-03-16", pd)
+}
