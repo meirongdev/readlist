@@ -25,14 +25,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
-// Health 健康信息:已发布 run、语料指纹、书量。
+// Health 健康信息:已发布 run、语料指纹、镜像版本。
+//
+// 不含全库书量:/healthz 与内容一样挂在公开域名上,而全库规模是运维信号,只在
+// /metrics 的 readlist_works_total 上报 —— 公开面只该看得见上榜的书。
 func (s *Server) Health() (map[string]any, error) {
 	runID, version, err := s.publishedRun()
 	if err != nil {
-		return nil, err
-	}
-	var workCount int
-	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM works`).Scan(&workCount); err != nil {
 		return nil, err
 	}
 	var corpusID string
@@ -45,7 +44,6 @@ func (s *Server) Health() (map[string]any, error) {
 		"run_id":           runID,
 		"corpus_id":        corpusID,
 		"standard_version": version,
-		"works":            workCount,
-		"version":          "readlist-mvp",
+		"version":          s.version,
 	}, nil
 }

@@ -73,7 +73,7 @@ type listItem struct {
 	Dims     map[string]score.DimScore `json:"dims"`
 }
 
-// handleList 单榜详情。先取列表行并立即释放连接(连接池上限 1),再跑其余查询。
+// handleList 单榜详情。榜单行随快照缓存,命中时除了确认已发布 run 之外不查库。
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	p, ok := presetByID(s.publicPresets(), id)
@@ -81,67 +81,24 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown preset")
 		return
 	}
-	runID, version, err := s.publishedRun()
-	if err != nil {
-		fail(w, r, err, "published_run")
-		return
-	}
-	if runID == "" {
-		writeError(w, http.StatusNotFound, "no published run")
-		return
-	}
-	if writeRunCache(w, r, runID) {
+	snap, ok := s.loadSnapshot(w, r)
+	if !ok {
 		return
 	}
 
-	type row struct {
-		rank     int
-		workID   string
-		tbs      float64
-		coverage float64
-		reason   string
-	}
-	rows, err := s.db.SQL().Query(`SELECT rank, work_id, tbs, coverage, reason
-		FROM lists WHERE run_id = ? AND list_id = ? ORDER BY rank`, runID, id)
-	if err != nil {
-		fail(w, r, err, "query list")
-		return
-	}
-	selected := make([]row, 0, 64)
-	for rows.Next() {
-		var rr row
-		if err := rows.Scan(&rr.rank, &rr.workID, &rr.tbs, &rr.coverage, &rr.reason); err != nil {
-			rows.Close()
-			fail(w, r, err, "scan list")
-			return
-		}
-		selected = append(selected, rr)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		fail(w, r, err, "scan list")
-		return
-	}
-	rows.Close()
-
-	snap, err := s.snapshot(runID, version)
-	if err != nil {
-		fail(w, r, err, "snapshot")
-		return
-	}
-
+	selected := snap.Lists[id]
 	items := make([]listItem, 0, len(selected))
 	for _, rr := range selected {
-		b := snap.Bases[rr.workID]
+		b := snap.Bases[rr.WorkID]
 		items = append(items, listItem{
-			Rank: rr.rank, WorkID: rr.workID, Title: b.Title, Author: b.Author,
+			Rank: rr.Rank, WorkID: rr.WorkID, Title: b.Title, Author: b.Author,
 			Topic: b.Topic, Level: b.Level, Year: b.Year,
-			Grade: snap.Grades[rr.workID], TBS: rr.tbs, Coverage: rr.coverage,
-			Reason: rr.reason, Reading: snap.Reading[rr.workID], Dims: snap.Dims[rr.workID],
+			Grade: snap.Grades[rr.WorkID], TBS: rr.TBS, Coverage: rr.Coverage,
+			Reason: rr.Reason, Reading: snap.Reading[rr.WorkID], Dims: snap.Dims[rr.WorkID],
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"list": metaOf(p), "run_id": runID, "standard_version": version,
+		"list": metaOf(p), "run_id": snap.RunID, "standard_version": snap.Version,
 		// 顶层平铺一份 id/name/description,兼容既有消费者。
 		"id": p.ID, "name": p.Name, "description": p.Description,
 		"items": items,

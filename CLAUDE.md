@@ -186,7 +186,15 @@ and closed once. Total library size is only ever exposed via `/metrics`
 handler must go through `loadSnapshot`, which also handles ETag / `If-None-Match`
 304s (`writeRunCache`) — a cache miss under crawler load can starve `/healthz` past
 the liveness probe timeout and get the single replica killed. If you add a new
-content endpoint, reuse this path rather than querying tables directly.
+content endpoint, reuse this path rather than querying tables directly. The
+snapshot carries the public lists' rows too, so a cached request costs exactly one
+point query (`publishedRun`); on a cold cache `buildMu` lets a single request
+rebuild while the rest wait (32 concurrent requests used to rebuild it 24 times).
+
+The per-edition → per-work aggregation (best publisher tier, best format, first
+usable pubdate, language) lives in exactly one place, `score.WorkInput.AddEdition`,
+and both the engine and the API's `loadWorkBases` call it — what a reader sees as
+a book's publisher/year must be what it was scored on. Don't re-inline it.
 
 ## Deployment shape (context for infra-adjacent changes)
 

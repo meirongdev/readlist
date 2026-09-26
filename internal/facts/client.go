@@ -35,6 +35,10 @@ type client struct {
 	lastAt  time.Time
 	// Requests 之外单独记 429,便于把「配额打满」与「网络故障」分开报。
 	throttled int
+	// headers 按源附加的请求头。凭据只能走这里,不能拼进 URL:网络层失败(超时、DNS、
+	// 连接被拒)时 net/http 返回的 *url.Error 带着完整 URL,而单项失败会被原样记进日志。
+	// 按源区分也保证了一个源的凭据不会被发给另一个源。
+	headers map[string]http.Header
 }
 
 func newClient(budget int, sleep time.Duration) *client {
@@ -43,6 +47,7 @@ func newClient(budget int, sleep time.Duration) *client {
 		budget:  budget,
 		sleep:   sleep,
 		blocked: map[string]bool{},
+		headers: map[string]http.Header{},
 	}
 }
 
@@ -69,6 +74,11 @@ func (c *client) getJSON(source, rawURL string, out any) (found bool, err error)
 	// 带上可联系的 UA:OpenLibrary 明确要求,也是对免费服务应有的礼貌。
 	req.Header.Set("User-Agent", "readlist/1.0 (+https://readlist.meirong.dev)")
 	req.Header.Set("Accept", "application/json")
+	for k, vs := range c.headers[source] {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
 	c.used++
 	c.lastAt = time.Now()

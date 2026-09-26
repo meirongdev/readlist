@@ -24,6 +24,9 @@ import (
 	"github.com/meirongdev/readlist/internal/store"
 )
 
+// version 镜像版本,发布时由 `-ldflags "-X main.version=<tag>"` 注入(见 Dockerfile)。
+var version = "dev"
+
 const usage = "usage: readlist [snapshot|ingest|init|seed|score|dryrun|diff <runA> <runB>|serve]"
 
 func main() {
@@ -384,7 +387,7 @@ func serve(cfg config.Config, db *store.DB, presets []preset.Preset) error {
 	// keep-alive 连接会一直堆积。
 	httpServer := &http.Server{
 		Addr:              cfg.APIListenAddr,
-		Handler:           api.NewServer(db, presets, cfg.ExposeReadStatus).Routes(),
+		Handler:           api.NewServer(db, presets, cfg.ExposeReadStatus, version).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -392,7 +395,7 @@ func serve(cfg config.Config, db *store.DB, presets []preset.Preset) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("api listening", "addr", cfg.APIListenAddr)
+		slog.Info("api listening", "addr", cfg.APIListenAddr, "version", version)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

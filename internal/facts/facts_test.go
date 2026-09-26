@@ -1,7 +1,9 @@
 package facts_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -631,4 +633,134 @@ func TestIngestPrefersNewBooksFirst(t *testing.T) {
 	// 最老的 DDIA(2017)这一轮还轮不到。
 	require.Zero(t, queryOne[int](t, db,
 		`SELECT COUNT(*) FROM evidence WHERE source='google_query' AND source_id='isbn:9781449373320'`))
+}
+
+// ---------- 凭据 ----------
+
+const testGoogleKey = "test-secret-key"
+
+// headerRecorder 一律回 404 的假源,记下每个请求带的 key 参数与 X-Goog-Api-Key 头。
+type headerRecorder struct {
+	srv       *httptest.Server
+	mu        sync.Mutex
+	urlKeys   []string
+	headerKey []string
+}
+
+func newHeaderRecorder(t *testing.T) *headerRecorder {
+	t.Helper()
+	h := &headerRecorder{}
+	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		h.urlKeys = append(h.urlKeys, r.URL.Query().Get("key"))
+		h.headerKey = append(h.headerKey, r.Header.Get("X-Goog-Api-Key"))
+		h.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(h.srv.Close)
+	return h
+}
+
+// BDD: ingestion.feature「外部 API 凭据不进 URL、不进日志」
+func TestGoogleKeyTravelsInHeaderNotURL(t *testing.T) {
+	// 放在 URL 里的 key 会跟着 URL 走进各种地方:错误信息、代理日志、监控里的请求样本。
+	google, openlib, hn := newHeaderRecorder(t), newHeaderRecorder(t), newHeaderRecorder(t)
+	_, err := facts.Ingest(newDB(t), facts.Config{
+		GoogleBase: google.srv.URL, OpenLibraryBase: openlib.srv.URL, HNBase: hn.srv.URL,
+		GoogleKey: testGoogleKey, Now: now,
+	})
+	require.NoError(t, err)
+
+	// 语料里既有带 google id 的版次(直取 volume)也有只带 ISBN 的(按 ISBN 搜)。
+	require.GreaterOrEqual(t, len(google.headerKey), 2, "前提:两条 Google 路径都走到了")
+	for i := range google.headerKey {
+		require.Equal(t, testGoogleKey, google.headerKey[i], "凭据应通过 X-Goog-Api-Key 头发送")
+		require.Empty(t, google.urlKeys[i], "请求 URL 里不该带 key 参数")
+	}
+	// Google 的凭据不该被发给第三方。
+	require.NotEmpty(t, openlib.headerKey, "前提:OpenLibrary 被请求过")
+	require.NotEmpty(t, hn.headerKey, "前提:HN 被请求过")
+	for _, other := range []*headerRecorder{openlib, hn} {
+		for i := range other.headerKey {
+			require.Empty(t, other.headerKey[i])
+			require.Empty(t, other.urlKeys[i])
+		}
+	}
+}
+
+// BDD: ingestion.feature「外部 API 凭据不进 URL、不进日志」
+func TestGoogleKeyNeverLoggedOnTransportError(t *testing.T) {
+	// 网络层失败(超时、DNS、连接被拒)时,net/http 返回的 *url.Error 会带上完整的
+	// 请求 URL,而单项失败会被 slog.Warn 原样记下 —— key 在 URL 里就等于写进日志。
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close() // 端口已关 → 连接被拒
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	f := newFakeAPIs(t)
+	cfg := f.cfg(100)
+	cfg.GoogleBase = deadURL
+	cfg.GoogleKey = testGoogleKey
+	st, err := facts.Ingest(newDB(t), cfg)
+	require.NoError(t, err, "单个源连不上不该让整轮摄入失败")
+	require.Positive(t, st.Errors, "前提:确实发生了网络错误")
+	require.Contains(t, logs.String(), deadURL, "前提:失败日志里带着请求 URL")
+	require.NotContains(t, logs.String(), testGoogleKey, "凭据出现在了日志里")
+}
+
+// BDD: ingestion.feature「单本书的证据写入是原子的」
+func TestIngestWritesAreAtomicPerBook(t *testing.T) {
+	// 查询标记一旦落库,这本书在 TTL 内就被当成「查过了」。标记与它背后的数据若不在
+	// 同一个事务里,中途失败(进程被杀、磁盘写满)的结果是:标记在,数据不在,而且
+	// 30–180 天内都不会重查。HN 那条路径更糟 —— 先删旧提及再写新提及,中断等于 C 维清零。
+	// 这里用触发器让某一步写入失败,模拟「写到一半」。
+	for _, tc := range []struct {
+		name    string
+		trigger string // 让这本书的某一步写入失败
+		marker  string // 这本书的查询标记:失败后必须不存在
+		data    string // 修好之后,下一次运行应当补回来的数据
+	}{
+		{
+			name: "Google:评分行写失败",
+			trigger: `CREATE TRIGGER boom BEFORE INSERT ON evidence WHEN NEW.source = 'google_books'
+				BEGIN SELECT RAISE(ABORT, 'boom'); END`,
+			marker: `SELECT COUNT(*) FROM evidence WHERE source = 'google_query' AND payload LIKE '%"found":true%'`,
+			data:   `SELECT COUNT(*) FROM evidence WHERE source = 'google_books'`,
+		},
+		{
+			name: "OpenLibrary:work id 写失败",
+			trigger: `CREATE TRIGGER boom BEFORE UPDATE OF ol_work_id ON works
+				BEGIN SELECT RAISE(ABORT, 'boom'); END`,
+			marker: `SELECT COUNT(*) FROM evidence WHERE source = 'openlibrary_query' AND source_id = 'isbn:9781449373320'`,
+			data:   `SELECT COUNT(*) FROM evidence WHERE source = 'openlibrary' AND source_id = 'OL19293745W'`,
+		},
+		{
+			name: "HN:提及写失败",
+			trigger: `CREATE TRIGGER boom BEFORE INSERT ON mentions
+				BEGIN SELECT RAISE(ABORT, 'boom'); END`,
+			marker: `SELECT COUNT(*) FROM evidence WHERE source = 'hn_search'
+				AND payload LIKE '%"accepted":2%'`,
+			data: `SELECT COUNT(*) FROM mentions WHERE work_id = (SELECT work_id FROM editions WHERE book_id = 1)`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPIs(t)
+			db := newDB(t)
+			_, err := db.SQL().Exec(tc.trigger)
+			require.NoError(t, err)
+
+			_, _ = facts.Ingest(db, f.cfg(100)) // 写到一半失败;失败本身是否冒泡不重要
+			require.Zero(t, queryOne[int](t, db, tc.marker), "数据没落库,查询标记也不该落库")
+
+			_, err = db.SQL().Exec(`DROP TRIGGER boom`)
+			require.NoError(t, err)
+			_, err = facts.Ingest(db, f.cfg(100))
+			require.NoError(t, err)
+			require.Positive(t, queryOne[int](t, db, tc.data), "下一次运行应当重查并补回数据")
+		})
+	}
 }

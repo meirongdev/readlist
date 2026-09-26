@@ -105,6 +105,8 @@ type WorkInput struct {
 	Language       string
 	Topics         []string // 主题标签(筛选 topics_any 用)
 	PubdateSource  string   // 可信来源过滤用(TrustedPubdate 的来源)
+
+	editions int // 已并入的版次数(AddEdition 用来判断「首个版次」)
 }
 
 // DimScore 单维得分(judgement 层产物)。

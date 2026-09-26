@@ -29,7 +29,7 @@ function readingBadges(item) {
   const hit = map[item.reading.status];
   if (hit) s += `<span class="badge ${hit[0]}">${hit[1]}</span>`;
   (item.reading.shelves || []).forEach((sh) => {
-    if (sh === "弃读") return; // 弃读默认不公开
+    if (sh === "弃读") return; // 服务端已过滤(api.privateShelves),这里只是第二道防线
     s += `<span class="badge badge-shelf">☆ ${esc(sh)}</span>`;
   });
   return s;

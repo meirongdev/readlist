@@ -61,12 +61,14 @@ type CombineResult struct {
 // eff = band_score(pct) 若 dim 在 bands,否则 pct。
 func Combine(dims map[Dim]DimScore, weights map[Dim]float64, bands map[Dim]Band, needs Needs) CombineResult {
 	var totalW, availW, acc float64
-	for _, w := range weights {
-		totalW += w
-	}
 	cr := CombineResult{TotalDims: len(weights)}
-	// 按 AllDims 的固定顺序遍历,而不是遍历 weights map:map 迭代序是随机的,
-	// 会让 Available/Missing 的顺序(进而理由串里「缺:…」的文案)每次运行都不同。
+	// 一律按 AllDims 的固定顺序遍历,而不是遍历 weights map:map 迭代序是随机的。
+	// 求和也不例外 —— {0.35, 0.30, 0.25, 0.10} 换个次序相加就在 1.0 与
+	// 0.9999999999999999 之间跳,coverage 与 TBS 跟着差在最低位(NFR-10)。
+	// 顺序不定还会让 Available/Missing(进而理由串里「缺:…」的文案)每次都不同。
+	for _, dim := range AllDims {
+		totalW += weights[dim]
+	}
 	for _, dim := range AllDims {
 		w, weighted := weights[dim]
 		if !weighted {

@@ -783,8 +783,8 @@ func needsByDim(p preset.Preset) Needs {
 // ---------- 加载层 ----------
 
 func (e *Engine) loadWorkInputs() (map[string]*WorkInput, error) {
-	// ORDER BY 不是为了好看:下面的「取最优出版社 / 最优格式」在并列时是先到先得,
-	// 没有稳定行序就会出不同结果。
+	// ORDER BY 不是为了好看:AddEdition 的「取最优出版社 / 最优格式」在并列时是
+	// 先到先得,没有稳定行序就会出不同结果。
 	rows, err := e.DB.SQL().Query(`SELECT w.work_id, w.canonical_title, w.first_author, w.primary_topic,
 			w.level, w.half_life_years,
 			e.book_id, e.publisher_norm, e.format, e.has_comments, e.has_cover, e.isbn13,
@@ -819,51 +819,16 @@ func (e *Engine) loadWorkInputs() (map[string]*WorkInput, error) {
 				WorkID: workID, Title: title, FirstAuthor: author,
 				PrimaryTopic: topic, Level: level,
 				HalfLifeYears: hl.Float64,
-				PublisherNorm: pubNorm, Format: format, Language: language,
 			}
 			inputs[workID] = w
 		}
 		bookToWork[bookID] = workID
-		w.HasComments = w.HasComments || hasComments
-		w.HasCover = w.HasCover || hasCover
-		w.HasISBN = w.HasISBN || (isbn.Valid && isbn.String != "")
-		if !w.MetadataFull && pubdate.Valid && pubdate.String != "" && pubNorm != "" {
-			w.MetadataFull = true
-		}
-		// 出版社取最优 tier(数字小 = 优)。
-		if pi := corpus.Publisher(pubNorm); w.PublisherTier == 0 || pi.Tier < w.PublisherTier {
-			w.PublisherTier = pi.Tier
-			w.PublisherNorm = pi.Norm
-		}
-		// 格式取可读性最优。
-		if corpus.FormatRank(format) > corpus.FormatRank(w.Format) {
-			w.Format = format
-		}
-		// 污染来源的日期一条都不进聚合。mtime 兜底值按构造就落在「最近」,让它进
-		// First/Latest 会同时造成两种错:把老书塞进「近一年新书」,又把该上榜的老书
-		// 从 min_age_years 里挡掉(review A2)。
-		if t, ok := parsePubdate(pubdate); ok && PubdateUsableForAge(pubdateSrc.String) {
-			if w.FirstPubdate == nil || t.Before(*w.FirstPubdate) {
-				first := t
-				w.FirstPubdate = &first
-			}
-			if w.LatestPubdate == nil || t.After(*w.LatestPubdate) {
-				latest := t
-				w.LatestPubdate = &latest
-			}
-			if TrustedPubdateSources[pubdateSrc.String] &&
-				(w.TrustedPubdate == nil || t.After(*w.TrustedPubdate)) {
-				trusted := t
-				w.TrustedPubdate = &trusted
-				w.PubdateSource = pubdateSrc.String
-			}
-		}
-		if personal.Valid && personal.Float64 > 0 {
-			if !w.HasPersonal || personal.Float64 > w.PersonalRating {
-				w.PersonalRating = personal.Float64
-				w.HasPersonal = true
-			}
-		}
+		w.AddEdition(Edition{
+			PublisherNorm: pubNorm, Format: format, Language: language,
+			HasComments: hasComments, HasCover: hasCover, ISBN13: isbn.String,
+			Pubdate: pubdate.String, PubdateSource: pubdateSrc.String,
+			PersonalRating: personal.Float64,
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -893,17 +858,6 @@ func (e *Engine) loadWorkInputs() (map[string]*WorkInput, error) {
 		}
 	}
 	return inputs, nil
-}
-
-func parsePubdate(v sql.NullString) (time.Time, bool) {
-	if !v.Valid || len(v.String) < 10 {
-		return time.Time{}, false
-	}
-	t, err := time.Parse("2006-01-02", v.String[:10])
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t, true
 }
 
 // evidenceWorkIndex 外部实体 id → **当前** work_id。
@@ -1094,7 +1048,8 @@ func (e *Engine) loadReading(inputs map[string]*WorkInput, bookToWork map[int]st
 			continue
 		}
 		w.HasReading = true
-		if status != "" {
+		// 多版次取最靠前的状态,与 API 徽章同一口径(见 corpus.ReadStatusRank)。
+		if corpus.ReadStatusRank(status) > corpus.ReadStatusRank(w.ReadStatus) {
 			w.ReadStatus = status
 		}
 		var shelves []string

@@ -2,6 +2,7 @@ package score
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"testing"
@@ -217,14 +218,16 @@ func TestComputeIsBitwiseReproducible(t *testing.T) {
 		fmt.Fprintf(&b, "corpus=%s facts=%s\n", c.CorpusID, c.FactsHash)
 		for _, p := range presets {
 			for _, en := range c.Lists[p.ID] {
-				fmt.Fprintf(&b, "%s|%d|%s|%.12f|%.12f|%s\n",
+				// %v 是能还原出原值的最短表示:最低位不同,字符串就不同。
+				// 之前用 %.12f,把 1.0 与 0.9999999999999999 印成了同一个串。
+				fmt.Fprintf(&b, "%s|%d|%s|%v|%v|%s\n",
 					p.ID, en.Rank, en.WorkID, en.TBS, en.Coverage, en.Reason)
 			}
 		}
 		for _, id := range c.WorkIDs {
 			for _, d := range AllDims {
 				ds := c.Dims[id][d]
-				fmt.Fprintf(&b, "%s|%s|%.12f|%s\n", id, d, ds.Score, ds.State)
+				fmt.Fprintf(&b, "%s|%s|%v|%s\n", id, d, ds.Score, ds.State)
 			}
 		}
 		return b.String()
@@ -234,6 +237,27 @@ func TestComputeIsBitwiseReproducible(t *testing.T) {
 	require.Contains(t, first, "timeless|1|", "前提:榜单不该是空的")
 	for i := 2; i <= 6; i++ {
 		require.Equal(t, first, render(), "第 %d 次重算与第 1 次不一致 —— NFR-10 要求逐位可复现", i)
+	}
+}
+
+// BDD: ranking.feature「同一份语料重算两次，榜单逐位一致」
+func TestCombineIsBitwiseStableAcrossMapOrder(t *testing.T) {
+	// {0.35, 0.30, 0.25, 0.10} 按不同次序相加,结果在 1.0 与 0.9999999999999999 之间跳;
+	// 而 Go 的 map 遍历次序每次都随机。权重总和若是遍历 map 求出来的,同一本书两次
+	// 打分的 coverage 与 TBS 就差在最低位 —— 并列打破与 min_coverage 的边界都因此不可复现。
+	weights := map[Dim]float64{DimAcclaim: 0.35, DimCommunity: 0.30, DimTrust: 0.25, DimReadability: 0.10}
+	dims := map[Dim]DimScore{}
+	for _, d := range AllDims {
+		dims[d] = DimScore{Score: 61.8, State: StateMeasured}
+	}
+	first := Combine(dims, weights, nil, nil)
+	require.Equal(t, 1.0, first.Coverage, "全部加权维可用时 coverage 必须恰好是 1")
+	for i := 0; i < 200; i++ {
+		got := Combine(dims, weights, nil, nil)
+		require.Equal(t, math.Float64bits(first.Coverage), math.Float64bits(got.Coverage),
+			"第 %d 次 coverage 与第一次不是同一个浮点数", i)
+		require.Equal(t, math.Float64bits(first.TBS), math.Float64bits(got.TBS),
+			"第 %d 次 TBS 与第一次不是同一个浮点数", i)
 	}
 }
 
@@ -491,6 +515,45 @@ func TestManualVetoValueAcceptsCommaSeparatedLists(t *testing.T) {
 	require.False(t, manual.Vetoed("w/x", "fresh-releases"), "没被点名的榜不受影响")
 	require.False(t, manual.Vetoed("other/work", "timeless"))
 	require.False(t, manual.Pinned("w/x", "timeless"), "veto 不该被读成 pin")
+}
+
+// BDD: reading-status.feature「多版次的阅读状态按同一规则合并」
+func TestReadStatusMergesAcrossEditionsByRank(t *testing.T) {
+	// calibre-web 里取消「已读」留下的是一行 read_status=0 而不是删行,所以
+	// 「一个版次已读、另一个版次显式未读」是日常操作就能造出来的数据。合并若是
+	// 「按 book_id 最后一行说了算」,读过的书会回到阅读队列,页面上却挂着 ✓ 已读。
+	for _, tc := range []struct {
+		name          string
+		first, second string // 较早 / 较晚版次的状态
+	}{
+		{"旧版次已读、新版次显式未读", "read", "unread"},
+		{"旧版次显式未读、新版次已读", "unread", "read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			presets := loadPresets(t)
+			eng := NewEngine(db, "1.0", testNow)
+
+			base, err := eng.Compute(presets)
+			require.NoError(t, err)
+			require.NotEmpty(t, base.Lists["to-read-next"], "前提:阅读队列非空")
+			wid := base.Lists["to-read-next"][0].WorkID
+
+			// 给这本书补一个 book_id 更大的版次,两个版次各带一条阅读记录。
+			first := queryStr(t, db, `SELECT MIN(book_id) FROM editions WHERE work_id=?`, wid)
+			mustExec(t, db, `INSERT INTO editions (book_id, work_id, title, format, language, publisher_norm)
+				SELECT 99999, work_id, title, format, language, publisher_norm
+				  FROM editions WHERE book_id=?`, first)
+			mustExec(t, db, `INSERT OR REPLACE INTO reading (book_id, status, shelves)
+				VALUES (?, ?, '[]'), (99999, ?, '[]')`, first, tc.first, tc.second)
+
+			res, err := eng.Compute(presets)
+			require.NoError(t, err)
+			require.Equal(t, "read", res.Inputs[wid].ReadStatus, "已读 > 未读,与版次顺序无关")
+			require.NotContains(t, workIDsOf(res.Lists["to-read-next"]), wid,
+				"读过的书不该回到阅读队列")
+		})
+	}
 }
 
 func TestRunGCKeepsOnlyRecentRuns(t *testing.T) {

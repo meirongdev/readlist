@@ -18,6 +18,8 @@ import (
 	"github.com/meirongdev/readlist/internal/store"
 )
 
+const testVersion = "v0.0.0-test"
+
 func newTestServer(t *testing.T, exposeRead bool) *Server {
 	t.Helper()
 	db, err := store.Open(t.TempDir() + "/test.db")
@@ -30,7 +32,7 @@ func newTestServer(t *testing.T, exposeRead bool) *Server {
 	eng := score.NewEngine(db, "1.0", time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC))
 	_, err = eng.Run(presets)
 	require.NoError(t, err)
-	return NewServer(db, presets, exposeRead)
+	return NewServer(db, presets, exposeRead, testVersion)
 }
 
 func doReq(t *testing.T, s *Server, method, path string) *httptest.ResponseRecorder {
@@ -352,6 +354,99 @@ func TestExposeReadStatusFalseHidesReadingAndRatings(t *testing.T) {
 	require.True(t, sawReading)
 }
 
+// listWorkIDs 直接从库里读已发布 run 的某份榜。改完 reading 再发请求的测试必须走这里:
+// 先调 API 会把改动之前的 snapshot 填进缓存。
+func listWorkIDs(t *testing.T, s *Server, listID string) []string {
+	t.Helper()
+	rows, err := s.db.SQL().Query(`SELECT work_id FROM lists
+		WHERE run_id = (SELECT run_id FROM published_run WHERE id = 1) AND list_id = ?
+		ORDER BY rank`, listID)
+	require.NoError(t, err)
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		out = append(out, id)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// BDD: reading-status.feature「弃读书架默认不公开」/ book-detail.feature「弃读状态默认不公开」
+func TestAbandonedShelfNeverLeavesServer(t *testing.T) {
+	// 「弃读」带评价意味(FR-46)。它此前只在 app.js 里被跳过,API 照样把书架名发出去
+	// —— 而 API 开了 CORS、发布了 OpenAPI 契约,本身就是公开面。
+	s := newTestServer(t, true)
+	listed := listWorkIDs(t, s, "timeless")
+	require.GreaterOrEqual(t, len(listed), 2, "前提:公开榜上至少两本书")
+	mixed, onlyAbandoned := listed[0], listed[1]
+
+	setReading := func(workID, status, shelves string) {
+		t.Helper()
+		_, err := s.db.SQL().Exec(`DELETE FROM reading
+			WHERE book_id IN (SELECT book_id FROM editions WHERE work_id = ?)`, workID)
+		require.NoError(t, err)
+		_, err = s.db.SQL().Exec(`INSERT INTO reading (book_id, status, shelves, downloads)
+			SELECT MIN(book_id), ?, ?, 0 FROM editions WHERE work_id = ?`, status, shelves, workID)
+		require.NoError(t, err)
+	}
+	setReading(mixed, "read", `["弃读","精读"]`)
+	setReading(onlyAbandoned, "", `["弃读"]`)
+
+	list := doReq(t, s, http.MethodGet, "/api/v1/lists/timeless")
+	require.NotContains(t, list.Body.String(), "弃读", "榜单响应里出现了弃读书架")
+	reading := map[string]map[string]any{}
+	for _, raw := range getJSON(t, list)["items"].([]any) {
+		it := raw.(map[string]any)
+		reading[it["work_id"].(string)] = asMap(it["reading"])
+	}
+	require.Equal(t, "read", reading[mixed]["status"], "其余可公开的状态照常输出")
+	require.Equal(t, []any{"精读"}, reading[mixed]["shelves"], "其余可公开的书架照常输出")
+	require.Equal(t, false, reading[onlyAbandoned]["has_reading"],
+		"弃读是唯一记录时,「有阅读记录」本身也不该泄露")
+	require.NotContains(t, reading[onlyAbandoned], "shelves")
+
+	for _, wid := range []string{mixed, onlyAbandoned} {
+		require.NotContains(t, doReq(t, s, http.MethodGet, workPath(wid)).Body.String(), "弃读",
+			"书详情 %s 的响应里出现了弃读书架", wid)
+	}
+	detail := getJSON(t, doReq(t, s, http.MethodGet, workPath(onlyAbandoned)))
+	require.Equal(t, false, asMap(detail["reading"])["has_reading"])
+}
+
+// BDD: reading-status.feature「多版次的阅读状态按同一规则合并」
+func TestReadingQueueNeverCarriesReadBadge(t *testing.T) {
+	// 榜单准入(评分引擎)与徽章(API)各自合并多版次的阅读状态。两边规则一旦不同,
+	// 阅读队列里就会出现挂着 ✓ 已读 的书 —— 这条测试把两层钉在一起。
+	s := newTestServer(t, true)
+	queue := listWorkIDs(t, s, "to-read-next")
+	require.NotEmpty(t, queue, "前提:阅读队列非空")
+	wid := queue[0]
+
+	// 旧版次已读、新版次显式未读 —— calibre-web 里取消「已读」留下的就是这种行。
+	exec := func(q string, args ...any) {
+		t.Helper()
+		_, err := s.db.SQL().Exec(q, args...)
+		require.NoError(t, err)
+	}
+	exec(`INSERT INTO editions (book_id, work_id, title, format, language, publisher_norm)
+		SELECT 99999, work_id, title, format, language, publisher_norm
+		  FROM editions WHERE work_id = ? ORDER BY book_id LIMIT 1`, wid)
+	exec(`INSERT OR REPLACE INTO reading (book_id, status, shelves)
+		SELECT MIN(book_id), 'read', '[]' FROM editions WHERE work_id = ? AND book_id <> 99999`, wid)
+	exec(`INSERT OR REPLACE INTO reading (book_id, status, shelves) VALUES (99999, 'unread', '[]')`)
+	_, err := score.NewEngine(s.db, "1.0", time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)).Run(s.presets)
+	require.NoError(t, err)
+
+	for _, raw := range getJSON(t, doReq(t, s, http.MethodGet, "/api/v1/lists/to-read-next"))["items"].([]any) {
+		it := raw.(map[string]any)
+		status := asMap(it["reading"])["status"]
+		require.NotContains(t, []any{"read", "reading"}, status,
+			"阅读队列里的 %s 挂着「%v」徽章", it["work_id"], status)
+	}
+}
+
 func TestReadOnlyContract(t *testing.T) {
 	s := newTestServer(t, true)
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
@@ -489,4 +584,101 @@ func TestLivezSurvivesDatabaseFailure(t *testing.T) {
 	require.Equal(t, http.StatusOK, live.Code, "/livez 不该依赖数据库")
 	require.Equal(t, http.StatusInternalServerError,
 		doReq(t, s, http.MethodGet, "/healthz").Code, "/healthz 该如实报告数据库故障")
+}
+
+// BDD: book-detail.feature「详情页展示的版次聚合与评分同源」
+func TestDisplayedEditionFactsMatchScoring(t *testing.T) {
+	// 「多版次 → work」的聚合(出版社取最优 tier、首版年份跳过污染来源、语言……)
+	// 展示层与评分引擎此前各写一份,已经漂移过一次:语言在引擎里取首个版次,在
+	// 展示层取首个非空。两份拷贝迟早再漂 —— 这条测试把两层钉在同一个结果上。
+	s := newTestServer(t, true)
+	listed := listWorkIDs(t, s, "timeless")
+	require.NotEmpty(t, listed, "前提:公开榜非空")
+	wid := listed[0]
+
+	exec := func(q string, args ...any) {
+		t.Helper()
+		_, err := s.db.SQL().Exec(q, args...)
+		require.NoError(t, err)
+	}
+	// 已有版次的语言全部置空 → 语言必须取后面第一个非空的版次。
+	exec(`UPDATE editions SET language = '' WHERE work_id = ?`, wid)
+	for _, ed := range []struct {
+		id                   int
+		lang, pub, date, src string
+	}{
+		// 出版社更差、日期更早且来源可用于判断年龄 → 首版年份变成 1999,出版社不变。
+		{99991, "deu", "Some Tiny Press", "1999-05-01", "calibre"},
+		// 更早,但是 mtime 兜底 → 评分与展示都不该认它。
+		{99992, "fra", "Some Tiny Press", "1990-01-01", "mtime-fallback"},
+	} {
+		exec(`INSERT INTO editions (book_id, work_id, title, format, language, publisher_norm, pubdate, pubdate_source)
+			VALUES (?, ?, 'alt edition', 'PDF', ?, ?, ?, ?)`, ed.id, wid, ed.lang, ed.pub, ed.date, ed.src)
+	}
+
+	c, err := score.NewEngine(s.db, "1.0", time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)).Compute(s.presets)
+	require.NoError(t, err)
+	w := c.Inputs[wid]
+	require.NotNil(t, w.FirstPubdate)
+	require.Equal(t, 1999, w.FirstPubdate.Year(), "calibre 来源可用于判断年龄;mtime 兜底的 1990 不算")
+
+	detail := getJSON(t, doReq(t, s, http.MethodGet, workPath(wid)))
+	require.Equal(t, w.PublisherNorm, detail["publisher"], "展示的出版社应是评分用的那个")
+	require.EqualValues(t, w.FirstPubdate.Year(), detail["year"], "首版年份与 min_age_years 同一口径")
+	require.Equal(t, "deu", detail["language"], "语言取第一个非空的版次语言")
+	require.Equal(t, w.Language, detail["language"], "展示的语言与评分输入不一致")
+}
+
+// BDD: api.feature「爬虫负载下内容请求不反复查库」
+func TestSnapshotBuiltOncePerRunUnderConcurrency(t *testing.T) {
+	// 换 run 之后缓存是冷的。单连接下,同时到达的 N 个请求会各自把快照重建一遍,
+	// 排队占住那条连接 —— 正是缓存要防的「爬虫把 /healthz 挤到超时」。
+	s := newTestServer(t, true)
+	listed := listWorkIDs(t, s, "timeless")
+	require.NotEmpty(t, listed)
+	paths := []string{"/api/v1/lists/timeless", "/api/v1/catalog", workPath(listed[0])}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			<-start
+			rr := httptest.NewRecorder()
+			s.Routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+			if rr.Code != http.StatusOK {
+				t.Errorf("%s → %d", path, rr.Code)
+			}
+		}(paths[i%len(paths)])
+	}
+	close(start)
+	wg.Wait()
+	require.EqualValues(t, 1, s.snapshotBuilds.Load(), "同一个 run 的快照只该从库里构建一次")
+}
+
+// BDD: api.feature「爬虫负载下内容请求不反复查库」
+func TestListServedFromSnapshotOnceCached(t *testing.T) {
+	s := newTestServer(t, true)
+	before := getJSON(t, doReq(t, s, http.MethodGet, "/api/v1/lists/timeless"))["items"]
+	require.NotEmpty(t, before)
+
+	// 缓存建好之后删掉榜单行:还能原样返回,说明这条路径没有再查 lists 表。
+	_, err := s.db.SQL().Exec(`DELETE FROM lists`)
+	require.NoError(t, err)
+	after := getJSON(t, doReq(t, s, http.MethodGet, "/api/v1/lists/timeless"))["items"]
+	require.Equal(t, before, after, "已缓存的 run 不该再按请求查榜单表")
+}
+
+// BDD: observability.feature「健康信息可确认正在运行的版本」
+func TestHealthzReportsBuildVersion(t *testing.T) {
+	m := getJSON(t, doReq(t, newTestServer(t, true), http.MethodGet, "/healthz"))
+	require.Equal(t, testVersion, m["version"], "版本号应来自构建注入,而不是写死的字符串")
+}
+
+// BDD: catalog.feature「不存在全库导出端点」
+func TestHealthzDoesNotExposeLibrarySize(t *testing.T) {
+	// /healthz 同样挂在公开域名上。全库规模是运维信号,只在 /metrics 上报。
+	m := getJSON(t, doReq(t, newTestServer(t, true), http.MethodGet, "/healthz"))
+	require.NotContains(t, m, "works", "全库计数只该出现在 /metrics")
 }

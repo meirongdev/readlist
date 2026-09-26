@@ -9,8 +9,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG TARGETOS TARGETARCH
+# 发布时由 image.yml 传入 git tag;/healthz 与启动日志据此报出正在运行的版本。
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/readlist ./cmd/readlist
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/readlist ./cmd/readlist
 
 # ---- 运行时(静态 + nonroot)----
 FROM gcr.io/distroless/static-debian12:nonroot

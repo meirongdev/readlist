@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/meirongdev/readlist/internal/preset"
 	"github.com/meirongdev/readlist/internal/store"
@@ -16,6 +17,7 @@ type Server struct {
 	db         *store.DB
 	presets    []preset.Preset
 	exposeRead bool
+	version    string // 镜像版本,构建时由 ldflags 注入(见 cmd/readlist 的 version)
 
 	// 已发布 run 的快照缓存。内容按 run 不可变,而 run 每夜才换一次。
 	//
@@ -26,13 +28,16 @@ type Server struct {
 	//
 	// 快照收窄到上榜并集之后每次重建便宜了一个量级,但便宜不等于免费 —— 单连接下
 	// 仍是串行的,缓存照留。
-	mu     sync.RWMutex
-	cached *snapshot
+	mu      sync.RWMutex
+	cached  *snapshot
+	buildMu sync.Mutex // 同一时刻只允许一个请求重建快照(见 snapshot)
+	// snapshotBuilds 快照实际从库里重建的次数。缓存工作正常时每个 run 只加一。
+	snapshotBuilds atomic.Int64
 }
 
 // NewServer 构建 API 服务。
-func NewServer(db *store.DB, presets []preset.Preset, exposeRead bool) *Server {
-	return &Server{db: db, presets: presets, exposeRead: exposeRead}
+func NewServer(db *store.DB, presets []preset.Preset, exposeRead bool, version string) *Server {
+	return &Server{db: db, presets: presets, exposeRead: exposeRead, version: version}
 }
 
 // Routes 全部为 GET/HEAD;未注册方法自动 405(mux 行为)→ 满足"零写接口"。

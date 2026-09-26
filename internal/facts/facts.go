@@ -1,10 +1,12 @@
 package facts
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -108,6 +110,10 @@ func Ingest(d *store.DB, cfg Config) (Stats, error) {
 		whitelist:  map[string]bool{},
 		titleAllow: map[string]bool{},
 		olWorkIDs:  map[string]string{},
+	}
+	if cfg.GoogleKey != "" {
+		// Google API 的标准请求头;key 不进 URL,见 client.headers。
+		i.client.headers[sourceGoogle] = http.Header{"X-Goog-Api-Key": {cfg.GoogleKey}}
 	}
 	switch {
 	case cfg.Budget <= 0:
@@ -339,57 +345,70 @@ func (i *Ingester) fetchGoogleFor(c candidate) error {
 	if err != nil {
 		return err
 	}
-	// 先写查询标记(不管有没有命中),这样"查不到"也只花一次配额。
-	//
-	// 命中时标记只能活到**评分 TTL**:Google 一次请求同时返回 volume id 与评分,
-	// 所以把「映射」缓存得比「评分」更久没有任何收益 —— 不重发这个请求,评分就刷不了。
-	// 之前统一用 180 天,后果是评分类 30 天 TTL 从来没被求值过,榜单实际半年才更新一次。
-	// 查不到则压 180 天:没有东西可刷,只需要记住"别再问了"。
-	markerTTL := i.cfg.MetaTTLDays
-	if found {
-		markerTTL = i.cfg.RatingsTTLDays
-	}
-	marker := map[string]any{"found": found, "volume_id": vol.ID, "queried": queryKey}
-	if err := i.putEvidence(sourceGoogleQuery, queryKey, c.WorkID, marker, markerTTL); err != nil {
+	pubdates := 0
+	if err := i.inTx(func(tx *sql.Tx) error {
+		// 查询标记不管有没有命中都写,这样"查不到"也只花一次配额。
+		//
+		// 命中时标记只能活到**评分 TTL**:Google 一次请求同时返回 volume id 与评分,
+		// 所以把「映射」缓存得比「评分」更久没有任何收益 —— 不重发这个请求,评分就刷不了。
+		// 之前统一用 180 天,后果是评分类 30 天 TTL 从来没被求值过,榜单实际半年才更新一次。
+		// 查不到则压 180 天:没有东西可刷,只需要记住"别再问了"。
+		markerTTL := i.cfg.MetaTTLDays
+		if found {
+			markerTTL = i.cfg.RatingsTTLDays
+		}
+		marker := map[string]any{"found": found, "volume_id": vol.ID, "queried": queryKey}
+		if err := i.putEvidence(tx, sourceGoogleQuery, queryKey, c.WorkID, marker, markerTTL); err != nil {
+			return err
+		}
+		if !found {
+			return nil
+		}
+
+		// 把 ISBN 查出来的 volume id 落库。两个收益:下次可以直取 volume(省掉一次搜索),
+		// 且评分行的键(volume id)从此能被**读取时**解析回这个 work —— 否则那 715 本走
+		// ISBN 路径的书,其评分只能靠 `evidence.work_id` 这个会随书名变动而失效的快照
+		// (见 score.evidenceWorkIndex)。
+		if vol.ID != "" && c.GoogleID == "" {
+			if _, err := tx.Exec(
+				`UPDATE editions SET google_volume_id=?
+				  WHERE book_id=? AND COALESCE(google_volume_id,'')=''`,
+				vol.ID, c.BookID); err != nil {
+				return fmt.Errorf("写 google_volume_id book=%d: %w", c.BookID, err)
+			}
+		}
+
+		// 评分行按 volume id 存:两个版次指向同一 volume 时自然合成一行,不会把同一份
+		// 评分计两遍。ratingsCount 为 0 时也存,靠 count<=0 让评分引擎忽略它。
+		if vol.ID != "" {
+			payload := map[string]any{
+				"rating": vol.VolumeInfo.AverageRating,
+				"count":  vol.VolumeInfo.RatingsCount,
+				"raw":    vol.VolumeInfo, // FR-11:外部响应原样留档
+			}
+			if err := i.putEvidence(tx, sourceGoogle, vol.ID, c.WorkID, payload, i.cfg.RatingsTTLDays); err != nil {
+				return err
+			}
+		}
+		// review M2 的关键一步:同一个响应里就带 publishedDate,顺手写成**带来源的**
+		// pubdate。readlist 要的不是"修好 calibre 的库",而是自己表里有个可信日期。
+		if date, ok := parseExternalDate(vol.VolumeInfo.PublishedDate); ok {
+			written, err := i.writePubdate(tx, c.BookID, date, "google")
+			if err != nil {
+				return err
+			}
+			if written {
+				pubdates++
+			}
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	if !found {
-		return nil
+	if found {
+		i.stats.GoogleFound++
 	}
-	i.stats.GoogleFound++
-
-	// 把 ISBN 查出来的 volume id 落库。两个收益:下次可以直取 volume(省掉一次搜索),
-	// 且评分行的键(volume id)从此能被**读取时**解析回这个 work —— 否则那 715 本走
-	// ISBN 路径的书,其评分只能靠 `evidence.work_id` 这个会随书名变动而失效的快照
-	// (见 score.evidenceWorkIndex)。
-	if vol.ID != "" && c.GoogleID == "" {
-		if _, err := i.db.SQL().Exec(
-			`UPDATE editions SET google_volume_id=?
-			  WHERE book_id=? AND COALESCE(google_volume_id,'')=''`,
-			vol.ID, c.BookID); err != nil {
-			return fmt.Errorf("写 google_volume_id book=%d: %w", c.BookID, err)
-		}
-	}
-
-	// 评分行按 volume id 存:两个版次指向同一 volume 时自然合成一行,不会把同一份
-	// 评分计两遍。ratingsCount 为 0 时也存,靠 count<=0 让评分引擎忽略它。
-	if vol.ID != "" {
-		payload := map[string]any{
-			"rating": vol.VolumeInfo.AverageRating,
-			"count":  vol.VolumeInfo.RatingsCount,
-			"raw":    vol.VolumeInfo, // FR-11:外部响应原样留档
-		}
-		if err := i.putEvidence(sourceGoogle, vol.ID, c.WorkID, payload, i.cfg.RatingsTTLDays); err != nil {
-			return err
-		}
-	}
-	// review M2 的关键一步:同一个响应里就带 publishedDate,顺手写成**带来源的**
-	// pubdate。readlist 要的不是"修好 calibre 的库",而是自己表里有个可信日期。
-	if date, ok := parseExternalDate(vol.VolumeInfo.PublishedDate); ok {
-		if err := i.writePubdate(c.BookID, date, "google"); err != nil {
-			return err
-		}
-	}
+	i.stats.PubdatesWritten += pubdates
 	return nil
 }
 
@@ -408,34 +427,46 @@ func (i *Ingester) fetchOpenLibraryFor(c candidate) error {
 	if err != nil {
 		return err
 	}
-	workKey := ""
+	workKey, olID := "", ""
 	if found && len(ed.Works) > 0 {
 		workKey = ed.Works[0].Key
+		olID = olWorkID(workKey)
 	}
-	marker := map[string]any{"found": found, "work_key": workKey, "queried": queryKey}
-	if err := i.putEvidence(sourceOLQuery, queryKey, c.WorkID, marker, i.cfg.MetaTTLDays); err != nil {
+	pubdates := 0
+	if err := i.inTx(func(tx *sql.Tx) error {
+		marker := map[string]any{"found": found, "work_key": workKey, "queried": queryKey}
+		if err := i.putEvidence(tx, sourceOLQuery, queryKey, c.WorkID, marker, i.cfg.MetaTTLDays); err != nil {
+			return err
+		}
+		if date, ok := parseExternalDate(ed.PublishDate); found && ok {
+			written, err := i.writePubdate(tx, c.BookID, date, "openlibrary")
+			if err != nil {
+				return err
+			}
+			if written {
+				pubdates++
+			}
+		}
+		if olID == "" {
+			return nil
+		}
+		// OL work id 是聚类键的最高优先级(system-design §4),存下来供后续升级聚类用,
+		// 也让「只刷第二跳」这条短路径有据可依。它必须与标记同进退:标记在、work id
+		// 不在,refreshOpenLibraryRatings 就无从刷起,评分会缺整整一个 180 天 TTL。
+		_, err := tx.Exec(
+			`UPDATE works SET ol_work_id=? WHERE work_id=? AND COALESCE(ol_work_id,'')=''`,
+			olID, c.WorkID)
+		return err
+	}); err != nil {
 		return err
 	}
+	i.stats.PubdatesWritten += pubdates
 	if !found {
 		return nil
 	}
 	i.stats.OpenLibraryFound++
-
-	if date, ok := parseExternalDate(ed.PublishDate); ok {
-		if err := i.writePubdate(c.BookID, date, "openlibrary"); err != nil {
-			return err
-		}
-	}
-	if workKey == "" {
+	if olID == "" {
 		return nil
-	}
-	// OL work id 是聚类键的最高优先级(system-design §4),存下来供后续升级聚类用,
-	// 也让「只刷第二跳」这条短路径有据可依。
-	olID := olWorkID(workKey)
-	if _, err := i.db.SQL().Exec(
-		`UPDATE works SET ol_work_id=? WHERE work_id=? AND COALESCE(ol_work_id,'')=''`,
-		olID, c.WorkID); err != nil {
-		return err
 	}
 	if _, ok := i.olWorkIDs[c.WorkID]; !ok {
 		i.olWorkIDs[c.WorkID] = olID
@@ -474,7 +505,9 @@ func (i *Ingester) fetchOLRatings(workID, olID string) error {
 		"count":  r.Summary.Count,
 		"raw":    map[string]any{"found": ok, "work": olID},
 	}
-	return i.putEvidence(sourceOpenLibrary, olID, workID, payload, i.cfg.RatingsTTLDays)
+	return i.inTx(func(tx *sql.Tx) error {
+		return i.putEvidence(tx, sourceOpenLibrary, olID, workID, payload, i.cfg.RatingsTTLDays)
+	})
 }
 
 // ingestMentions 打 HN,产出 mentions 行。
@@ -526,38 +559,61 @@ func (i *Ingester) ingestMentions() error {
 			continue
 		}
 		hits := matchHN(w.title, res, i.cfg.Now)
-		// matcher 版本写进标记:规则升级后旧标记自动视为过期(见 hnMatcherVersion)。
-		marker := map[string]any{"found": found, "raw_hits": res.NbHits,
-			"accepted": len(hits), "matcher": hnMatcherVersion}
-		if err := i.putEvidence(sourceHN, w.id, w.id, marker, i.cfg.RatingsTTLDays); err != nil {
-			return err
-		}
-		// 命中集合整组替换:查询结果就是当下的真相,旧规则认下的命中不该残留。
-		// 人工否决在 mention_overrides 表,按 (work_id, object_id) 在读取端生效,
-		// 不受这次重写影响。
-		if _, err := i.db.SQL().Exec(`DELETE FROM mentions WHERE work_id=?`, w.id); err != nil {
-			return err
-		}
-		for _, m := range hits {
-			// 保留 objectID:人工可以逐条否决(R-3)。
-			if _, err := i.db.SQL().Exec(`INSERT OR REPLACE INTO mentions
-				(work_id, object_id, created_at, matched_by) VALUES (?,?,?,?)`,
-				w.id, m.ObjectID, m.CreatedAt.Format(time.RFC3339), m.MatchedBy); err != nil {
+		// 先删后写 + 写标记必须在同一个事务里:中途失败若留下「旧提及已删、新提及没写、
+		// 标记却说查过了」,这本书的 C 维会在整个 TTL 内归零,且不会重查。
+		if err := i.inTx(func(tx *sql.Tx) error {
+			// 命中集合整组替换:查询结果就是当下的真相,旧规则认下的命中不该残留。
+			// 人工否决在 mention_overrides 表,按 (work_id, object_id) 在读取端生效,
+			// 不受这次重写影响。
+			if _, err := tx.Exec(`DELETE FROM mentions WHERE work_id=?`, w.id); err != nil {
 				return err
 			}
-			i.stats.MentionsFound++
+			for _, m := range hits {
+				// 保留 objectID:人工可以逐条否决(R-3)。
+				if _, err := tx.Exec(`INSERT OR REPLACE INTO mentions
+					(work_id, object_id, created_at, matched_by) VALUES (?,?,?,?)`,
+					w.id, m.ObjectID, m.CreatedAt.Format(time.RFC3339), m.MatchedBy); err != nil {
+					return err
+				}
+			}
+			// matcher 版本写进标记:规则升级后旧标记自动视为过期(见 hnMatcherVersion)。
+			marker := map[string]any{"found": found, "raw_hits": res.NbHits,
+				"accepted": len(hits), "matcher": hnMatcherVersion}
+			return i.putEvidence(tx, sourceHN, w.id, w.id, marker, i.cfg.RatingsTTLDays)
+		}); err != nil {
+			return err
 		}
+		i.stats.MentionsFound += len(hits)
 	}
 	return nil
 }
 
+// inTx 把一本书的一组写入放进一个事务:查询标记与它背后的数据要么一起落库,要么都不落。
+//
+// 标记一旦落库,这本书在 TTL(30–180 天)内就被当成「查过了」。标记先落、数据没落
+// (进程被杀、磁盘写满)的结果是数据永远补不回来,而且没有任何报错。
+//
+// 网络请求必须在事务**之外**发:事务持有 SQLite 的写锁,不能跨过一次最长 20 秒的
+// HTTP 请求。所以每条路径都是「先取回响应,再一次性写」。
+func (i *Ingester) inTx(fn func(tx *sql.Tx) error) error {
+	tx, err := i.db.SQL().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // putEvidence 原样存外部响应 + 归一化的 rating/count(FR-11:派生分只从缓存重算)。
-func (i *Ingester) putEvidence(source, sourceID, workID string, payload any, ttlDays int) error {
+func (i *Ingester) putEvidence(tx *sql.Tx, source, sourceID, workID string, payload any, ttlDays int) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = i.db.SQL().Exec(`INSERT OR REPLACE INTO evidence
+	_, err = tx.Exec(`INSERT OR REPLACE INTO evidence
 		(source, source_id, work_id, payload, fetched_at, ttl_days) VALUES (?,?,?,?,?,?)`,
 		source, sourceID, workID, string(body), i.cfg.Now.Format(time.RFC3339), ttlDays)
 	if err != nil {
@@ -566,32 +622,31 @@ func (i *Ingester) putEvidence(source, sourceID, workID string, payload any, ttl
 	return nil
 }
 
-// writePubdate 用外部日期覆盖该版次的 pubdate,并记下真实来源。
+// writePubdate 用外部日期覆盖该版次的 pubdate,并记下真实来源;返回是否真的改写了。
 // 优先级用 corpus.PubdateSourcePriority(与 snapshot 同一份):没有这条优先级,
 // 当晚的结果就取决于源的遍历顺序 —— OpenLibrary 给的是自由文本日期
 // (实测形如 "Apr 02, 2017"),会盖掉 Google 更精确的 "2017-03-16"。
 //
 // 这一步做完,时效维度才第一次真正有判别力 —— 而它完全不需要动 calibre 的库
 // (review M2:readlist 要的是"自己表里有个带来源的 pubdate")。
-func (i *Ingester) writePubdate(bookID int, date, source string) error {
+func (i *Ingester) writePubdate(tx *sql.Tx, bookID int, date, source string) (bool, error) {
 	var curDate, curSource string
-	err := i.db.SQL().QueryRow(
+	err := tx.QueryRow(
 		`SELECT COALESCE(pubdate,''), COALESCE(pubdate_source,'') FROM editions WHERE book_id=?`,
 		bookID).Scan(&curDate, &curSource)
 	if err != nil {
-		return fmt.Errorf("读 pubdate book=%d: %w", bookID, err)
+		return false, fmt.Errorf("读 pubdate book=%d: %w", bookID, err)
 	}
 	if corpus.PubdateSourcePriority[source] < corpus.PubdateSourcePriority[curSource] {
-		return nil // 已有更可信的来源,不降级
+		return false, nil // 已有更可信的来源,不降级
 	}
 	if curDate == date && curSource == source {
-		return nil
+		return false, nil
 	}
-	if _, err := i.db.SQL().Exec(
+	if _, err := tx.Exec(
 		`UPDATE editions SET pubdate=?, pubdate_source=? WHERE book_id=?`,
 		date, source, bookID); err != nil {
-		return fmt.Errorf("写 pubdate book=%d: %w", bookID, err)
+		return false, fmt.Errorf("写 pubdate book=%d: %w", bookID, err)
 	}
-	i.stats.PubdatesWritten++
-	return nil
+	return true, nil
 }

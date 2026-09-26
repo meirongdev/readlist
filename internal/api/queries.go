@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"strings"
-	"time"
 
 	"github.com/meirongdev/readlist/internal/corpus"
 	"github.com/meirongdev/readlist/internal/score"
@@ -52,19 +51,25 @@ func (s *Server) listedWorks(runID string) (query string, args []any) {
 
 // workBase 书的基本信息(works + editions 聚合)。
 type workBase struct {
-	WorkID    string `json:"work_id"`
-	Title     string `json:"title"`
-	Author    string `json:"author"`
-	Topic     string `json:"topic"`
-	Level     string `json:"level"`
-	Publisher string `json:"publisher,omitempty"`
+	WorkID    string
+	Title     string
+	Author    string
+	Topic     string
+	Level     string
+	Publisher string
 	// Year 是**首版年份**(最早版次,且跳过被污染的日期来源)。评分引擎的 min_age_years
 	// 用的是同一口径,两边一致;各版次的原始日期与来源在 editions 里逐条列出。
-	Year        int    `json:"year,omitempty"`
-	Language    string `json:"language,omitempty"`
-	Format      string `json:"format,omitempty"`
-	HasCover    bool   `json:"has_cover,omitempty"`
-	HasComments bool   `json:"has_comments,omitempty"`
+	Year     int
+	Language string
+}
+
+// listRow 一份公开榜里的一行(lists 表)。
+type listRow struct {
+	Rank     int
+	WorkID   string
+	TBS      float64
+	Coverage float64
+	Reason   string
 }
 
 type editionRow struct {
@@ -87,19 +92,13 @@ type readingInfo struct {
 	HasReading bool     `json:"has_reading"`
 }
 
-// readStatusRank 多版次状态合并用:取"最靠前"的那个,而不是最后扫到的那行。
-func readStatusRank(status string) int {
-	switch status {
-	case "read":
-		return 3
-	case "reading":
-		return 2
-	case "unread":
-		return 1
-	default:
-		return 0
-	}
-}
+// privateShelves 不对外输出的书架(FR-46)。说一本书「弃读」带评价意味,等于公开给它
+// 打了差评。
+//
+// 过滤必须在服务端做:它此前只在 app.js 里被跳过,API 照样把书架名发出去 —— 而 API
+// 开了 CORS、发布了 OpenAPI 契约,本身就是公开面。评分引擎不受影响,照常读全部书架
+// (to-read-next 靠它排除弃读书),这里只管对外输出。
+var privateShelves = map[string]bool{"弃读": true}
 
 // snapshot 一个 run 的只读视图,**只含上榜 work**(见 listedWorks)。
 //
@@ -111,6 +110,7 @@ func readStatusRank(status string) int {
 type snapshot struct {
 	RunID    string
 	Version  string
+	Lists    map[string][]listRow // 公开榜 id → 按 rank 升序的行
 	Bases    map[string]workBase
 	Editions map[string][]editionRow
 	Dims     map[string]map[string]score.DimScore
@@ -120,11 +120,16 @@ type snapshot struct {
 
 // snapshot 取一个 run 的视图,命中缓存则零查询返回。
 func (s *Server) snapshot(runID, version string) (*snapshot, error) {
-	s.mu.RLock()
-	cached := s.cached
-	s.mu.RUnlock()
-	if cached != nil && cached.RunID == runID && cached.Version == version {
-		return cached, nil
+	if snap := s.cachedSnapshot(runID, version); snap != nil {
+		return snap, nil
+	}
+	// 冷缓存时只放一个请求去建,其余的等它建完直接命中。换 run 之后同时到达的请求
+	// 若各自重建,就是 N 份同样的查询排在那条唯一的连接上(实测 32 个并发请求建了
+	// 24 次)—— 正是缓存要防的「爬虫把 /healthz 挤到超时」。
+	s.buildMu.Lock()
+	defer s.buildMu.Unlock()
+	if snap := s.cachedSnapshot(runID, version); snap != nil {
+		return snap, nil
 	}
 
 	snap, err := s.buildSnapshot(runID, version)
@@ -142,9 +147,23 @@ func (s *Server) snapshot(runID, version string) (*snapshot, error) {
 	return snap, nil
 }
 
+// cachedSnapshot 缓存里若正好是这个 run 的视图就返回它,否则 nil。
+func (s *Server) cachedSnapshot(runID, version string) *snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if c := s.cached; c != nil && c.RunID == runID && c.Version == version {
+		return c
+	}
+	return nil
+}
+
 func (s *Server) buildSnapshot(runID, version string) (*snapshot, error) {
+	s.snapshotBuilds.Add(1)
 	snap := &snapshot{RunID: runID, Version: version}
 	var err error
+	if snap.Lists, err = s.loadLists(runID); err != nil {
+		return nil, err
+	}
 	if snap.Bases, snap.Editions, err = s.loadWorkBases(runID); err != nil {
 		return nil, err
 	}
@@ -158,11 +177,41 @@ func (s *Server) buildSnapshot(runID, version string) (*snapshot, error) {
 	return snap, nil
 }
 
+// loadLists 加载 run 里全部**公开**榜的行。internal 榜不进快照 —— 它不对外服务。
+func (s *Server) loadLists(runID string) (map[string][]listRow, error) {
+	out := map[string][]listRow{}
+	presets := s.publicPresets()
+	if len(presets) == 0 {
+		return out, nil // `IN ()` 在 SQLite 里是语法错误
+	}
+	args := []any{runID}
+	ph := make([]string, len(presets))
+	for i, p := range presets {
+		ph[i] = "?"
+		args = append(args, p.ID)
+	}
+	rows, err := s.db.SQL().Query(`SELECT list_id, rank, work_id, tbs, coverage, reason
+		FROM lists WHERE run_id = ? AND list_id IN (`+strings.Join(ph, ",")+`)
+		ORDER BY list_id, rank`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var listID string
+		var r listRow
+		if err := rows.Scan(&listID, &r.Rank, &r.WorkID, &r.TBS, &r.Coverage, &r.Reason); err != nil {
+			return nil, err
+		}
+		out[listID] = append(out[listID], r)
+	}
+	return out, rows.Err()
+}
+
 // loadWorkBases 加载**上榜** work 的聚合信息(work_id → base)。
 //
-// 出版社与格式走 corpus 里那份唯一实现(与评分引擎同一套「取最优」规则):
-// 之前展示层用"第一行的值"、引擎用"最优 tier/格式",于是详情页展示的出版社
-// 可能不是打分用的那个。
+// 出版社、语言、首版年份走 score.WorkInput.AddEdition —— 与评分引擎同一份聚合实现。
+// 之前两边各写一份,已经漂移过:展示给读者的出版社与年份必须就是打分用的那一个。
 func (s *Server) loadWorkBases(runID string) (map[string]workBase, map[string][]editionRow, error) {
 	listed, args := s.listedWorks(runID)
 	rows, err := s.db.SQL().Query(`SELECT w.work_id, w.canonical_title, w.first_author,
@@ -180,7 +229,7 @@ func (s *Server) loadWorkBases(runID string) (map[string]workBase, map[string][]
 
 	bases := map[string]workBase{}
 	editions := map[string][]editionRow{}
-	tier := map[string]int{}
+	aggs := map[string]*score.WorkInput{}
 	for rows.Next() {
 		var (
 			workID, title, author, topic, level string
@@ -196,29 +245,17 @@ func (s *Server) loadWorkBases(runID string) (map[string]workBase, map[string][]
 			&pubdate, &pubdateSrc, &isbn, &volumeID, &personal); err != nil {
 			return nil, nil, err
 		}
-		b, seen := bases[workID]
+		agg, seen := aggs[workID]
 		if !seen {
-			b = workBase{WorkID: workID, Title: title, Author: author, Topic: topic, Level: level}
+			agg = &score.WorkInput{}
+			aggs[workID] = agg
+			bases[workID] = workBase{WorkID: workID, Title: title, Author: author, Topic: topic, Level: level}
 		}
-		b.HasCover = b.HasCover || hasCover
-		b.HasComments = b.HasComments || hasComments
-		if language != "" && b.Language == "" {
-			b.Language = language
-		}
-		if pi := corpus.Publisher(pubNorm); tier[workID] == 0 || pi.Tier < tier[workID] {
-			tier[workID] = pi.Tier
-			b.Publisher = pi.Norm
-		}
-		if corpus.FormatRank(format) > corpus.FormatRank(b.Format) {
-			b.Format = format
-		}
-		// 与评分引擎同一口径:被污染的来源(mtime 兜底/缺失)不参与年份展示。
-		// 否则一本 2013 年的书会因为某个版次的 mtime 兜底值而在页面上显示成 2026。
-		if t, ok := parsePubdate(pubdate); ok && score.PubdateUsableForAge(pubdateSrc.String) &&
-			(b.Year == 0 || t.Year() < b.Year) {
-			b.Year = t.Year()
-		}
-		bases[workID] = b
+		agg.AddEdition(score.Edition{
+			PublisherNorm: pubNorm, Format: format, Language: language,
+			HasComments: hasComments, HasCover: hasCover, ISBN13: isbn.String,
+			Pubdate: pubdate.String, PubdateSource: pubdateSrc.String,
+		})
 
 		ed := editionRow{
 			BookID: bookID, Title: edTitle, Publisher: pubNorm, Format: format,
@@ -230,15 +267,20 @@ func (s *Server) loadWorkBases(runID string) (map[string]workBase, map[string][]
 		}
 		editions[workID] = append(editions[workID], ed)
 	}
-	return bases, editions, rows.Err()
-}
-
-func parsePubdate(v sql.NullString) (time.Time, bool) {
-	if !v.Valid || len(v.String) < 10 {
-		return time.Time{}, false
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
 	}
-	t, err := time.Parse("2006-01-02", v.String[:10])
-	return t, err == nil
+	// 被污染的日期来源(mtime 兜底/缺失)不进首版年份 —— 否则一本 2013 年的书会因为
+	// 某个版次的 mtime 兜底值而在页面上显示成 2026。这条规则在 AddEdition 里。
+	for wid, agg := range aggs {
+		b := bases[wid]
+		b.Publisher, b.Language = agg.PublisherNorm, agg.Language
+		if agg.FirstPubdate != nil {
+			b.Year = agg.FirstPubdate.Year()
+		}
+		bases[wid] = b
+	}
+	return bases, editions, nil
 }
 
 // loadDims 加载 run 里**上榜** work 的 dim_scores(work_id → dim → DimScore)。
@@ -354,13 +396,24 @@ func (s *Server) readingByWork(editions map[string][]editionRow) (map[string]rea
 		}
 		var shelves []string
 		_ = json.Unmarshal([]byte(shelvesJSON), &shelves)
+		public := make([]string, 0, len(shelves))
+		for _, sh := range shelves {
+			if !privateShelves[sh] {
+				public = append(public, sh)
+			}
+		}
+		// 这一行唯一的内容就是私有书架 → 当它不存在。否则响应里是 has_reading=true
+		// 却什么都不显示,等于在说「这里有一条不能给你看的记录」。
+		if status == "" && len(shelves) > 0 && len(public) == 0 {
+			continue
+		}
 		ri := out[wid]
 		ri.HasReading = true
-		// 多版次落在同一 work 上时取"最靠前"的状态,而不是最后扫到的那行。
-		if readStatusRank(status) > readStatusRank(ri.Status) {
+		// 多版次取最靠前的状态,与评分引擎同一口径(见 corpus.ReadStatusRank)。
+		if corpus.ReadStatusRank(status) > corpus.ReadStatusRank(ri.Status) {
 			ri.Status = status
 		}
-		ri.Shelves = append(ri.Shelves, shelves...)
+		ri.Shelves = append(ri.Shelves, public...)
 		out[wid] = ri
 	}
 	return out, rows.Err()

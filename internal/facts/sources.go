@@ -34,22 +34,14 @@ type gbSearch struct {
 	Items      []gbVolume `json:"items"`
 }
 
-// googleVolumeURL 直取一个 volume。
+// googleVolumeURL 直取一个 volume。API key 不在 URL 里 —— 它走请求头(见 client.headers)。
 func (i *Ingester) googleVolumeURL(volumeID string) string {
-	q := url.Values{}
-	if i.cfg.GoogleKey != "" {
-		q.Set("key", i.cfg.GoogleKey)
-	}
-	return joinURL(i.cfg.GoogleBase, "/volumes/"+url.PathEscape(volumeID), q)
+	return joinURL(i.cfg.GoogleBase, "/volumes/"+url.PathEscape(volumeID), nil)
 }
 
 // googleISBNURL 按 ISBN 查。
 func (i *Ingester) googleISBNURL(isbn string) string {
-	q := url.Values{"q": {"isbn:" + isbn}}
-	if i.cfg.GoogleKey != "" {
-		q.Set("key", i.cfg.GoogleKey)
-	}
-	return joinURL(i.cfg.GoogleBase, "/volumes", q)
+	return joinURL(i.cfg.GoogleBase, "/volumes", url.Values{"q": {"isbn:" + isbn}})
 }
 
 // fetchGoogle 返回 volume(找不到则 ok=false)。
