@@ -46,6 +46,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/lists/{id}", s.handleList)
 	mux.HandleFunc("GET /api/v1/works/{id}", s.handleWork)
 	mux.HandleFunc("GET /api/v1/catalog", s.handleCatalog)
+	mux.HandleFunc("GET /api/v1/openapi.yaml", handleOpenAPI)
 	// /api/ 兜底:未知资源 404;非 GET 一律 405(零写接口)。
 	mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -55,7 +56,7 @@ func (s *Server) Routes() http.Handler {
 		http.NotFound(w, r)
 	}))
 	mux.Handle("/", staticHandler())
-	return mux
+	return withCORS(mux)
 }
 
 // writeRunCache 给「内容随 run 变」的响应打上 ETag 与缓存头,并处理 If-None-Match。

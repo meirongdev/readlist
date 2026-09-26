@@ -1,0 +1,520 @@
+openapi: 3.1.0
+info:
+  title: readlist API
+  version: "1"
+  summary: 技术书多维评分与书单的只读 API
+  description: |
+    readlist 对私人 Calibre 书库做 7 维独立评分，按「权重档案（preset）」发布公开书单。
+    本 API **只读**：全部为 GET/HEAD，其它方法一律 405。
+
+    - 只公开**上了公开榜单的书**（公开榜单的并集），不枚举整个书库。
+    - 内容按「已发布 run」不可变，每夜换一次。内容接口带 `ETag`（= run_id）与
+      `Cache-Control: public, max-age=60, must-revalidate`，支持 `If-None-Match` → 304。
+    - 维度键：`A` 口碑 · `C` 社区热度 · `F` 新鲜度 · `T` 可信度 · `D` 深度 · `P` 实用性 ·
+      `readability` 可读性。某维没有证据时 `state` 为 `unknown`，不会编一个 0 分。
+
+    本文件随二进制内嵌发布，与代码同版本；`internal/api/openapi_test.go` 断言每个已注册的
+    `/api/v1` 路由都在这里有对应条目。
+servers:
+  - url: https://readlist.meirong.dev
+# 公开只读，无需认证。
+security: []
+tags:
+  - name: lists
+    description: 榜单（= 公开的权重档案）
+  - name: works
+    description: 上榜书目与单本详情
+  - name: meta
+    description: 已发布 run 的元信息
+paths:
+  /api/v1/meta:
+    get:
+      tags: [meta]
+      operationId: getMeta
+      summary: 当前已发布的 run
+      description: 不带缓存头。还没打过分时 `run_id` 与 `standard_version` 为空串。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, standard_version, expose_read_status]
+                properties:
+                  run_id:
+                    type: string
+                    examples: [std1.0-1790386801602652865]
+                  standard_version:
+                    type: string
+                    description: 评分标准版本
+                    examples: ["1.0"]
+                  expose_read_status:
+                    type: boolean
+                    description: 为 false 时各处的 `reading` 与 `personal_rating` 被隐去
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/lists:
+    get:
+      tags: [lists]
+      operationId: listLists
+      summary: 全部公开榜单的口径
+      description: 每份榜单附带它的权重、带宽约束与准入要求，读者据此看见排名按什么算。
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, standard_version, lists]
+                properties:
+                  run_id:
+                    type: string
+                  standard_version:
+                    type: string
+                  lists:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ListMeta"
+        "304":
+          $ref: "#/components/responses/NotModified"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/lists/{id}:
+    get:
+      tags: [lists]
+      operationId: getList
+      summary: 单份榜单及其书目
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 榜单 id（见 `GET /api/v1/lists`）
+          schema:
+            type: string
+          examples:
+            timeless:
+              value: timeless
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [list, run_id, standard_version, id, name, description, items]
+                properties:
+                  list:
+                    $ref: "#/components/schemas/ListMeta"
+                  run_id:
+                    type: string
+                  standard_version:
+                    type: string
+                  id:
+                    type: string
+                    description: 同 `list.id`，为兼容既有消费者平铺在顶层
+                  name:
+                    type: string
+                    description: 同 `list.name`
+                  description:
+                    type: string
+                    description: 同 `list.description`
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ListItem"
+        "304":
+          $ref: "#/components/responses/NotModified"
+        "404":
+          description: 未知榜单（`unknown preset`，含 internal 榜）或尚无已发布 run（`no published run`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/works/{id}:
+    get:
+      tags: [works]
+      operationId: getWork
+      summary: 单本书详情（逐维评分、版次、外链）
+      description: |
+        ⚠️ `work_id` 形如 `作者/书名`，**自带斜杠和空格**，必须整体百分号编码
+        （斜杠编成 `%2F`），否则路由匹配不上、直接 404。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: work_id，整体做 URL 编码
+          schema:
+            type: string
+          examples:
+            ddia:
+              summary: Designing Data-Intensive Applications
+              value: kleppmann/designing data intensive applications
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkDetail"
+        "304":
+          $ref: "#/components/responses/NotModified"
+        "404":
+          description: 不是上榜书（`unknown work`）或尚无已发布 run（`no published run`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/catalog:
+    get:
+      tags: [works]
+      operationId: getCatalog
+      summary: 上榜书目（全部公开榜单的并集）
+      description: |
+        按书名、再按 work_id 稳定排序。**不按 grade 过滤**：某几维缺证据的书照样出现，
+        并在 `missing` 里标注缺哪几维。
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, standard_version, total, works]
+                properties:
+                  run_id:
+                    type: string
+                  standard_version:
+                    type: string
+                  total:
+                    type: integer
+                  works:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CatalogRow"
+        "304":
+          $ref: "#/components/responses/NotModified"
+        "404":
+          description: 尚无已发布 run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/openapi.yaml:
+    get:
+      tags: [meta]
+      operationId: getOpenAPI
+      summary: 本文档
+      responses:
+        "200":
+          description: OpenAPI 3.1 文档（YAML）
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+components:
+  parameters:
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: 上次拿到的 ETag；run 没换则回 304
+      schema:
+        type: string
+
+  headers:
+    ETag:
+      description: 当前 run 的 id（带引号）；换 run 即失效
+      schema:
+        type: string
+
+  responses:
+    NotModified:
+      description: run 未变，沿用缓存
+    InternalError:
+      description: 数据库错误（刻意回 500，而不是静默返回空数据）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    Dim:
+      type: string
+      description: 维度键
+      enum: [A, C, F, T, D, P, readability]
+
+    DimScore:
+      type: object
+      required: [raw, pct, score, state]
+      properties:
+        raw:
+          type: number
+          description: 原始测量值
+        pct:
+          type: number
+          description: 库内百分位（0–100）
+        score:
+          type: number
+          description: 参与加权的分数（0–100）
+        state:
+          type: string
+          enum: [measured, shrunk, unknown]
+          description: "`unknown` = 无证据，前端应显示「数据不足」"
+        source:
+          type: string
+          description: 证据来源
+        confidence:
+          type: number
+
+    DimScores:
+      type: object
+      description: 维度键 → 该维评分
+      propertyNames:
+        $ref: "#/components/schemas/Dim"
+      additionalProperties:
+        $ref: "#/components/schemas/DimScore"
+
+    Band:
+      type: object
+      required: [target, tol]
+      properties:
+        target:
+          type: number
+        tol:
+          type: number
+
+    ListMeta:
+      type: object
+      required: [id, name, description, size, order, min_coverage, weights]
+      properties:
+        id:
+          type: string
+          examples: [timeless]
+        name:
+          type: string
+          examples: [经典长青]
+        description:
+          type: string
+        size:
+          type: integer
+          description: 榜单容量
+        order:
+          type: string
+          enum: [desc, asc]
+        min_coverage:
+          type: number
+          description: 入选所需的最低证据覆盖率（0–1）
+        weights:
+          type: object
+          description: 维度键 → 权重，总和为 1
+          additionalProperties:
+            type: number
+        bands:
+          type: object
+          description: 维度键 → 目标带宽（选材约束）
+          additionalProperties:
+            $ref: "#/components/schemas/Band"
+        needs:
+          type: object
+          description: 维度键 → 入选要求的最低 state
+          additionalProperties:
+            type: string
+
+    Reading:
+      type: object
+      description: "阅读状态；`expose_read_status=false` 时只剩 `has_reading: false`"
+      required: [has_reading]
+      properties:
+        status:
+          type: string
+          enum: [read, reading, unread]
+        shelves:
+          type: array
+          items:
+            type: string
+        has_reading:
+          type: boolean
+
+    ListItem:
+      type: object
+      required: [rank, work_id, title, author, topic, level, grade, tbs, coverage, reason, reading, dims]
+      properties:
+        rank:
+          type: integer
+        work_id:
+          type: string
+        title:
+          type: string
+        author:
+          type: string
+        topic:
+          type: string
+        level:
+          type: string
+        year:
+          type: integer
+        grade:
+          type: string
+          description: 证据等级
+        tbs:
+          type: number
+          description: 加权总分（Total Book Score）
+        coverage:
+          type: number
+          description: 证据覆盖率（0–1）
+        reason:
+          type: string
+          description: 入选理由（人类可读）
+        reading:
+          $ref: "#/components/schemas/Reading"
+        dims:
+          $ref: "#/components/schemas/DimScores"
+
+    CatalogRow:
+      type: object
+      required: [work_id, title, author, topic, level, grade]
+      properties:
+        work_id:
+          type: string
+        title:
+          type: string
+        author:
+          type: string
+        topic:
+          type: string
+        level:
+          type: string
+        year:
+          type: integer
+        grade:
+          type: string
+        language:
+          type: string
+        missing:
+          type: array
+          description: 缺证据的维度
+          items:
+            $ref: "#/components/schemas/Dim"
+
+    Edition:
+      type: object
+      required: [book_id, title]
+      properties:
+        book_id:
+          type: integer
+        title:
+          type: string
+        publisher:
+          type: string
+        format:
+          type: string
+        language:
+          type: string
+        pubdate:
+          type: string
+        pubdate_source:
+          type: string
+        isbn13:
+          type: string
+        google_volume_id:
+          type: string
+        personal_rating:
+          type: number
+          description: "`expose_read_status=false` 时不出现"
+
+    WorkDetail:
+      type: object
+      required: [work_id, title, author, topic, level, publisher, year, language, grade,
+                 run_id, standard_version, dims, missing, editions, reading, links]
+      properties:
+        work_id:
+          type: string
+        title:
+          type: string
+        author:
+          type: string
+        topic:
+          type: string
+        level:
+          type: string
+        publisher:
+          type: string
+        year:
+          type: integer
+        language:
+          type: string
+        grade:
+          type: string
+        run_id:
+          type: string
+        standard_version:
+          type: string
+        dims:
+          $ref: "#/components/schemas/DimScores"
+        missing:
+          type: array
+          items:
+            type: object
+            required: [dim, why]
+            properties:
+              dim:
+                $ref: "#/components/schemas/Dim"
+              why:
+                type: string
+                examples: [标注置信度低]
+        editions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Edition"
+        reading:
+          $ref: "#/components/schemas/Reading"
+        links:
+          type: object
+          description: 外链（本站不保存正文）；有 ISBN / volume id 时直连条目，否则退回搜索
+          required: [google_books, openlibrary]
+          properties:
+            google_books:
+              type: string
+              format: uri
+            openlibrary:
+              type: string
+              format: uri
